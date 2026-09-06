@@ -1,0 +1,13 @@
+# Rust 构建产物
+VaultGuard_rs/target/
+
+# 本地验证产物与日志
+VaultGuard_rs/verify_*/
+VaultGuard_rs/*.log
+VaultGuard_rs/*.pid
+standalone_check/
+vg_cli.log
+VG_OUT/
+
+# 发布二进制不进仓库（每次构建重新生成）
+VaultGuard.exe

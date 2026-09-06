@@ -1,0 +1,9 @@
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "D:\\ZigTools\\zig-cc-link.exe"
+
+# msvc 保留同一 wrapper 兜底（仅宿主工具时偶用）
+[target.x86_64-pc-windows-msvc]
+linker = "D:\\ZigTools\\zig-cc-link.exe"
