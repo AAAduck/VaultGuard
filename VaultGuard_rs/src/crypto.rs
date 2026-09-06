@@ -247,6 +247,42 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// 口令指纹：SHA-256("VaultGuard-fp" || pass) 前 4 字节的 hex。
+/// 非安全值：仅供界面上核对多次输入的口令是否一致（不落日志、不随文件存储）。
+pub fn pass_fingerprint(pass: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"VaultGuard-fp");
+    h.update(pass.as_bytes());
+    let d = h.finalize();
+    d[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 生成强口令：大小写/数字/符号混合，剔除易混淆字符（l I O 0 1）。
+pub fn generate_passphrase(len: usize) -> String {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    let groups: [&[u8]; 4] = [
+        b"abcdefghijkmnpqrstuvwxyz", // 无 l
+        b"ABCDEFGHJKLMNPQRSTUVWXYZ", // 无 I O
+        b"23456789",                 // 无 0 1
+        b"!@#$%^&*-_=+",
+    ];
+    let mut rng = StdRng::from_entropy();
+    let mut chars: Vec<u8> = groups
+        .iter()
+        .map(|g| g[rng.gen_range(0..g.len())])
+        .collect(); // 每类至少一个
+    let all: Vec<u8> = groups.concat();
+    while chars.len() < len {
+        chars.push(all[rng.gen_range(0..all.len())]);
+    }
+    for i in (1..chars.len()).rev() {
+        let j = rng.gen_range(0..=i);
+        chars.swap(i, j);
+    }
+    String::from_utf8(chars).expect("ascii only")
+}
+
 fn gcm_ctr(key: &[u8; 32], nonce: &[u8; 12]) -> Ctr128BE<Aes256> {
     let mut iv = [0u8; 16];
     iv[..12].copy_from_slice(nonce);

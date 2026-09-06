@@ -109,11 +109,15 @@ impl Sink for PngSink {
     }
 }
 
-pub fn enc_png<G>(out: &Path, gen: G) -> io::Result<()>
+pub fn enc_png<G>(cover: Option<&[u8]>, out: &Path, gen: G) -> io::Result<()>
 where
     G: FnOnce(&mut dyn Sink) -> io::Result<()>,
 {
-    let bg = BG_PNGS[(rand::random::<u32>() as usize) % BG_PNGS.len()];
+    // 封面来源：Some = 用户自定义（须为合法 PNG），None = 内置底图随机选一
+    let bg: &[u8] = match cover {
+        Some(c) => c,
+        None => BG_PNGS[(rand::random::<u32>() as usize) % BG_PNGS.len()],
+    };
     let pref = bg_prefix(bg)?;
     let mut f = File::create(out)?;
     f.write_all(&pref)?;
@@ -205,11 +209,23 @@ impl Sink for JpgSink {
     }
 }
 
-pub fn enc_jpg<G>(out: &Path, gen: G) -> io::Result<()>
+pub fn enc_jpg<G>(cover: Option<&[u8]>, out: &Path, gen: G) -> io::Result<()>
 where
     G: FnOnce(&mut dyn Sink) -> io::Result<()>,
 {
-    let bg = BG_JPGS[(rand::random::<u32>() as usize) % BG_JPGS.len()];
+    // 自定义封面：取其 SOI 之后的部分接在加密段之后；无自定义时用内置底图
+    let tail: &[u8] = match cover {
+        Some(c) => {
+            if c.len() < 4 || c[..2] != JPG_SIG {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "自定义封面不是有效的 JPG 图片",
+                ));
+            }
+            &c[2..]
+        }
+        None => &BG_JPGS[(rand::random::<u32>() as usize) % BG_JPGS.len()][2..],
+    };
     let mut sink = JpgSink {
         buf: Vec::with_capacity(1 << 20),
     };
@@ -217,7 +233,7 @@ where
     let mut f = File::create(out)?;
     f.write_all(&JPG_SIG)?;
     f.write_all(&sink.buf)?;
-    f.write_all(&bg[2..])?;
+    f.write_all(tail)?;
     f.flush()?;
     Ok(())
 }
@@ -383,13 +399,17 @@ impl Sink for DocxSink {
     }
 }
 
-pub fn enc_docx<G>(out: &Path, gen: G) -> io::Result<()>
+pub fn enc_docx<G>(cover: Option<&[u8]>, out: &Path, gen: G) -> io::Result<()>
 where
     G: FnOnce(&mut dyn Sink) -> io::Result<()>,
 {
-    let tpl = DOCX_TPLS[(rand::random::<u32>() as usize) % DOCX_TPLS.len()];
+    // 自定义封面：任意有效的 DOCX/ZIP 文档都可作为模板
+    let tpl: &[u8] = match cover {
+        Some(c) => c,
+        None => DOCX_TPLS[(rand::random::<u32>() as usize) % DOCX_TPLS.len()],
+    };
     let mut zin = zip::ZipArchive::new(Cursor::new(tpl))
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("模板损坏: {}", e)))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("模板损坏（或自定义封面不是有效的 DOCX 文档）: {}", e)))?;
     let mut zout = zip::ZipWriter::new(File::create(out)?);
     let opts = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
@@ -580,4 +600,35 @@ pub fn probe_vault(path: &Path) -> Option<&'static str> {
         return Some("docx");
     }
     None
+}
+
+/// 校验自定义封面：png 需可解析出 IEND，jpg 需 SOI 且足够长，docx 需为有效 zip。
+pub fn validate_cover(shell: &str, path: &Path) -> io::Result<()> {
+    let data =
+        std::fs::read(path).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("读取封面失败: {e}")))?;
+    match shell {
+        "jpg" => {
+            if data.len() < 4 || data[..2] != JPG_SIG {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "自定义封面不是有效的 JPG 图片",
+                ));
+            }
+        }
+        "docx" => {
+            zip::ZipArchive::new(Cursor::new(&data[..])).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "自定义封面不是有效的 DOCX 文档")
+            })?;
+        }
+        _ => {
+            if data.len() < 8 || data[..8] != PNG_SIG {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "自定义封面不是有效的 PNG 图片",
+                ));
+            }
+            bg_prefix(&data)?;
+        }
+    }
+    Ok(())
 }

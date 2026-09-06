@@ -49,6 +49,7 @@ fn main() {
     let mut no_msg = false;
     let mut ui_smoke = false;
     let mut keep_name = false;
+    let mut cover: Option<PathBuf> = None;
     let mut password: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -59,6 +60,12 @@ fn main() {
             "--no-msg" => no_msg = true,
             "--ui-smoke" => ui_smoke = true,
             "--keep-name" => keep_name = true,
+            "--cover" => {
+                i += 1;
+                if i < args.len() {
+                    cover = Some(PathBuf::from(&args[i]));
+                }
+            }
             "--password" => {
                 i += 1;
                 if i < args.len() {
@@ -93,11 +100,15 @@ fn main() {
             .map(|r| (r.dst, Some(r.entries), Some(r.plain_bytes)))
     } else {
         let ps: Vec<PathBuf> = rest.iter().map(PathBuf::from).collect();
-        let key_src = match password.as_deref() {
-            Some(p) if !p.is_empty() => KeySource::Passphrase(p.to_string()),
-            _ => KeySource::Builtin,
+        let opts = engine::EncOptions {
+            key_src: match password.as_deref() {
+                Some(p) if !p.is_empty() => KeySource::Passphrase(p.to_string()),
+                _ => KeySource::Builtin,
+            },
+            keep_name,
+            cover,
         };
-        engine::do_enc(&ps, shell, &out_root, &key_src, keep_name, None)
+        engine::do_enc(&ps, shell, &out_root, &opts, None)
             .map(|(o, n, s)| (o, Some(n), Some(s)))
     };
 

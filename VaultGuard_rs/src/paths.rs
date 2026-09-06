@@ -117,6 +117,36 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// 自定义封面目录：%APPDATA%\VaultGuard\covers（每个外壳各一份 cover.png/jpg/docx）
+pub fn covers_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| out_root().join(".config"));
+    base.join(APP).join("covers")
+}
+
+/// 当前外壳是否设置了自定义封面
+pub fn custom_cover(shell: &str) -> Option<PathBuf> {
+    let p = covers_dir().join(format!("cover.{shell}"));
+    p.is_file().then_some(p)
+}
+
+/// 启用自定义封面（复制进封面目录，之后移动/删除原文件不影响）
+pub fn set_custom_cover(shell: &str, src: &Path) -> std::io::Result<()> {
+    let dir = covers_dir();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::copy(src, dir.join(format!("cover.{shell}"))).map(|_| ())
+}
+
+/// 恢复内置随机封面
+pub fn clear_custom_cover(shell: &str) -> std::io::Result<()> {
+    let p = covers_dir().join(format!("cover.{shell}"));
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}
+
 /// 系统桌面目录
 pub fn desktop_dir() -> PathBuf {
     if let Ok(up) = std::env::var("USERPROFILE") {

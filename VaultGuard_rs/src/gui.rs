@@ -9,6 +9,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use eframe::egui;
 use egui::Color32;
 
+use crate::crypto;
 use crate::engine;
 use crate::paths;
 use crate::safe;
@@ -76,6 +77,7 @@ struct VaultApp {
     out_dir: String,
     passphrase: String,
     passphrase2: String,
+    show_pass: bool,
     allow_no_pass: bool,
     keep_name: bool,
     busy: bool,
@@ -135,6 +137,7 @@ impl VaultApp {
             out_dir: paths::out_root().display().to_string(),
             passphrase: String::new(),
             passphrase2: String::new(),
+            show_pass: false,
             allow_no_pass: false,
             keep_name: false,
             busy: false,
@@ -214,20 +217,25 @@ impl VaultApp {
         let shell = SHELLS[self.shell];
         let shell_name = SHELL_NAMES[self.shell];
         let out_dir = PathBuf::from(self.out_dir.trim());
-        let key_src = if self.passphrase.is_empty() {
-            engine::KeySource::Builtin
-        } else {
-            engine::KeySource::Passphrase(self.passphrase.clone())
+        let opts = engine::EncOptions {
+            key_src: if self.passphrase.is_empty() {
+                engine::KeySource::Builtin
+            } else {
+                engine::KeySource::Passphrase(self.passphrase.clone())
+            },
+            keep_name: self.keep_name,
+            cover: paths::custom_cover(SHELLS[self.shell]),
         };
-        let use_pass = matches!(key_src, engine::KeySource::Passphrase(_));
-        let keep_name = self.keep_name;
+        let use_pass = matches!(opts.key_src, engine::KeySource::Passphrase(_));
+        let custom_cover = opts.cover.is_some();
         let tx = self.tx.clone();
         self.busy = true;
         self.log(&format!(
-            ">>> 加密 {} 项（外壳 {}，{}）…",
+            ">>> 加密 {} 项（外壳 {}，{}，封面 {}）…",
             items.len(),
             shell_name,
-            if use_pass { "口令加密" } else { "内置密钥" }
+            if use_pass { "口令加密" } else { "内置密钥" },
+            if custom_cover { "自定义" } else { "内置" }
         ));
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Line(format!(
@@ -242,7 +250,7 @@ impl VaultApp {
                 };
                 let _ = tx.send(Msg::Pct(pct));
             };
-            match engine::do_enc(&items, shell, &out_dir, &key_src, keep_name, Some(&prog)) {
+            match engine::do_enc(&items, shell, &out_dir, &opts, Some(&prog)) {
                 Ok((o, n, s)) => {
                     let _ = tx.send(Msg::Line(format!("完成: {}", o.display())));
                     let _ = tx.send(Msg::Line(format!("   {} 项，明文 {}", n, paths::sz(s))));
@@ -444,13 +452,24 @@ impl VaultApp {
 
                 ui.add_space(10.0);
                 section_title(ui, "口令（保护隐私，推荐设置）");
-                let r1 = ui.add(
-                    egui::TextEdit::singleline(&mut self.passphrase)
-                        .password(true)
-                        .hint_text("输入口令")
-                        .desired_width(width - 4.0)
-                        .font(egui::TextStyle::Monospace),
-                );
+                ui.horizontal(|ui| {
+                    let r1 = ui.add(
+                        egui::TextEdit::singleline(&mut self.passphrase)
+                            .password(!self.show_pass)
+                            .hint_text("输入口令")
+                            .desired_width(width - 74.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if ui
+                        .add(ghost_button(if self.show_pass { "隐藏" } else { "显示" }))
+                        .clicked()
+                    {
+                        self.show_pass = !self.show_pass;
+                    }
+                    if r1.changed() {
+                        self.allow_no_pass = false;
+                    }
+                });
                 ui.add_space(3.0);
                 let r2 = ui.add(
                     egui::TextEdit::singleline(&mut self.passphrase2)
@@ -459,19 +478,77 @@ impl VaultApp {
                         .desired_width(width - 4.0)
                         .font(egui::TextStyle::Monospace),
                 );
-                if r1.changed() || r2.changed() {
+                ui.add_space(3.0);
+                if ui
+                    .add_enabled(
+                        !self.busy && self.passphrase.is_empty(),
+                        ghost_button("生成强口令（自动填入并复制）"),
+                    )
+                    .clicked()
+                {
+                    let gen = crypto::generate_passphrase(16);
+                    self.passphrase = gen.clone();
+                    self.passphrase2 = gen;
+                    ui.output_mut(|o| o.copied_text = self.passphrase.clone());
+                    self.log("已生成 16 位强口令并复制到剪贴板，请妥善保存（遗忘无法找回）。");
+                }
+                if r2.changed() {
                     self.allow_no_pass = false;
                 }
                 ui.add_space(3.0);
-                pass_hint(ui, &self.passphrase, &self.passphrase2, self.allow_no_pass);
-                if self.passphrase.is_empty() && !self.allow_no_pass {
-                    if ui
-                        .add(ghost_button("跳过口令，不设口令继续"))
-                        .clicked()
-                    {
-                        self.allow_no_pass = true;
-                        self.log("已跳过口令：本次加密使用内置密钥（不推荐用于敏感文件）。");
+                // 口令状态机：未设口令时提供 跳过/取消跳过 双向按钮，跳过后也能反悔
+                if self.passphrase.is_empty() {
+                    if self.allow_no_pass {
+                        ui.label(
+                            egui::RichText::new(
+                                "已选择跳过口令：仅防随手翻看，任何拿到程序的人都可解密（敏感文件不建议）",
+                            )
+                            .size(9.5)
+                            .color(TEXT_MUTED),
+                        );
+                        if ui.add(ghost_button("取消跳过，改设口令")).clicked() {
+                            self.allow_no_pass = false;
+                            self.log("已取消跳过口令：设置口令（两次输入一致）后即可口令加密。");
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "未设置口令：仅防随手翻看，任何拿到程序的人都可解密（不推荐用于敏感文件）",
+                            )
+                            .size(9.5)
+                            .color(TEXT_MUTED),
+                        );
+                        if ui.add(ghost_button("跳过口令，不设口令继续")).clicked() {
+                            self.allow_no_pass = true;
+                            self.log("已跳过口令：本次加密使用内置密钥（不推荐用于敏感文件）。");
+                        }
                     }
+                } else if self.passphrase != self.passphrase2 {
+                    ui.label(
+                        egui::RichText::new("两次输入的口令不一致")
+                            .size(9.5)
+                            .color(BUSY_AMBER),
+                    );
+                } else if self.passphrase.chars().count() < 8 {
+                    ui.label(
+                        egui::RichText::new("口令偏短，建议 12 位以上。口令遗忘后文件无法找回")
+                            .size(9.5)
+                            .color(BUSY_AMBER),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "口令加密已就绪（Argon2id）· 钥匙指纹 {}",
+                            crypto::pass_fingerprint(&self.passphrase)
+                        ))
+                        .size(9.5)
+                        .color(ACCENT_TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new("同一条口令指纹相同，可用于核对是否输错。口令遗忘后文件无法找回")
+                            .size(9.5)
+                            .color(TEXT_FAINT),
+                    );
                 }
 
                 ui.add_space(10.0);
@@ -488,15 +565,75 @@ impl VaultApp {
                         }
                     }
                 });
-                ui.checkbox(&mut self.keep_name, "保留原文件名作为输出名");
-                ui.label(
-                    egui::RichText::new("默认输出随机文件名（如 VG_20260906_3f8a.png），不泄露原文件名")
-                        .size(9.5)
-                        .color(TEXT_FAINT),
-                );
 
                 ui.add_space(12.0);
-                section_title(ui, "添加");
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("高级").size(11.0).strong().color(TEXT_MUTED),
+                )
+                .id_source("adv")
+                .show(ui, |ui| {
+                    ui.add_space(2.0);
+                    // 自定义封面：跟随当前选中的外壳，各自记忆（存于 %APPDATA% 封面目录）
+                    let shell = SHELLS[self.shell];
+                    let custom = paths::custom_cover(shell).is_some();
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "封面：{}",
+                                if custom { "自定义 ✔" } else { "内置随机" }
+                            ))
+                            .size(11.0)
+                            .color(if custom { ACCENT_TEXT } else { TEXT_MUTED }),
+                        );
+                        if ui.add_enabled(!self.busy, ghost_button("自定义…")).clicked() {
+                            let (filter, exts): (&str, &[&str]) = match shell {
+                                "jpg" => ("JPG 图片", &["jpg", "jpeg"]),
+                                "docx" => ("DOCX 文档", &["docx"]),
+                                _ => ("PNG 图片", &["png"]),
+                            };
+                            if let Some(p) =
+                                rfd::FileDialog::new().add_filter(filter, exts).pick_file()
+                            {
+                                match shells::validate_cover(shell, &p) {
+                                    Ok(()) => match paths::set_custom_cover(shell, &p) {
+                                        Ok(()) => self.log(&format!(
+                                            "已启用自定义封面（{} 外壳）：{}",
+                                            shell,
+                                            p.display()
+                                        )),
+                                        Err(e) => self.log(&format!("失败：{e}")),
+                                    },
+                                    Err(e) => self.log(&format!("失败：{e}")),
+                                }
+                            }
+                        }
+                        if custom
+                            && ui
+                                .add_enabled(!self.busy, ghost_button("恢复默认"))
+                                .clicked()
+                        {
+                            match paths::clear_custom_cover(shell) {
+                                Ok(()) => self.log("已恢复内置随机封面。"),
+                                Err(e) => self.log(&format!("失败：{e}")),
+                            }
+                        }
+                    });
+                    if let Some(p) = paths::custom_cover(shell) {
+                        ui.label(
+                            egui::RichText::new(format!("　└ {}", p.display()))
+                                .monospace()
+                                .size(9.5)
+                                .color(TEXT_FAINT),
+                        );
+                    }
+                    ui.add_space(4.0);
+                    ui.checkbox(
+                        &mut self.keep_name,
+                        "保留原文件名作为输出名（默认随机，不泄露原名）",
+                    );
+                });
+
+                // 操作按钮组固定在面板底部：用空白撑开后从上往下排
                 let busy = self.busy;
                 ui.columns(2, |cols| {
                     let w0 = cols[0].available_width();
@@ -1025,36 +1162,6 @@ impl VaultApp {
 fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(11.0).strong().color(TEXT_MUTED));
     ui.add_space(3.0);
-}
-
-/// 口令状态提示（伪装加密页）。跳过口令按钮由调用方渲染并同步状态。
-fn pass_hint(ui: &mut egui::Ui, pass: &str, pass2: &str, skipped: bool) {
-    if pass.is_empty() {
-        let msg = if skipped {
-            "已选择跳过口令：仅防随手翻看，敏感文件不建议"
-        } else {
-            "未设置口令：仅防随手翻看，任何拿到程序的人都可解密（不推荐用于敏感文件）"
-        };
-        ui.label(egui::RichText::new(msg).size(9.5).color(TEXT_MUTED));
-    } else if pass != pass2 {
-        ui.label(
-            egui::RichText::new("两次输入的口令不一致")
-                .size(9.5)
-                .color(BUSY_AMBER),
-        );
-    } else if pass.chars().count() < 8 {
-        ui.label(
-            egui::RichText::new("口令偏短，建议 12 位以上。口令遗忘后文件无法找回")
-                .size(9.5)
-                .color(BUSY_AMBER),
-        );
-    } else {
-        ui.label(
-            egui::RichText::new("口令加密已就绪（Argon2id）。口令遗忘后文件无法找回，请牢记")
-                .size(9.5)
-                .color(ACCENT_TEXT),
-        );
-    }
 }
 
 /// 伪装外壳卡片：名称 + 右侧 mono 徽标，第二行描述；选中态 emerald 描边。

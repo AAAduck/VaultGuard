@@ -290,15 +290,22 @@ pub fn stream_decrypt(
     Ok(size)
 }
 
+/// 加密选项：密钥来源、输出命名、自定义封面。
+pub struct EncOptions {
+    pub key_src: KeySource,
+    /// false = 输出随机文件名（不泄露原文件名）
+    pub keep_name: bool,
+    /// 自定义封面文件（须与所选外壳同类型）；None = 内置随机封面
+    pub cover: Option<PathBuf>,
+}
+
 /// 高层加密。返回 (输出路径, 打包项数, 明文 tar 字节数)。
-/// key_src 决定是否口令加密；keep_name=false 时输出名随机化（不泄露原文件名）；
 /// 加密全程无明文临时文件（tar 流直通加密管道）。
 pub fn do_enc(
     paths: &[PathBuf],
     shell: &str,
     out_root: &Path,
-    key_src: &KeySource,
-    keep_name: bool,
+    opts: &EncOptions,
     on_progress: Option<&ProgressFn<'_>>,
 ) -> Result<(PathBuf, usize, u64), String> {
     let mut valid: Vec<PathBuf> = Vec::new();
@@ -310,7 +317,7 @@ pub fn do_enc(
     if valid.is_empty() {
         return Err("没有可加密的文件/文件夹".to_string());
     }
-    if let KeySource::Passphrase(p) = key_src {
+    if let KeySource::Passphrase(p) = &opts.key_src {
         if p.trim().is_empty() {
             return Err("口令不能为空（不设口令请使用内置密钥模式）".to_string());
         }
@@ -342,7 +349,7 @@ pub fn do_enc(
     });
 
     // 输出名：默认随机化（隐私——文件名不泄露原内容），可按需保留原名
-    let base = if keep_name {
+    let base = if opts.keep_name {
         let raw = safe_name(&first, 110);
         let stem = match raw.rfind('.') {
             Some(i) if i > 0 => raw[..i].to_string(),
@@ -355,20 +362,26 @@ pub fn do_enc(
     let out = uniq(&out_root.join(&base));
     std::fs::create_dir_all(out_root).map_err(|e| e.to_string())?;
 
+    // 自定义封面：随选项携带（须与外壳同类型），读取失败直接报错不产生半成品
+    let cover: Option<Vec<u8>> = match &opts.cover {
+        Some(p) => Some(std::fs::read(p).map_err(|e| format!("读取自定义封面失败: {e}"))?),
+        None => None,
+    };
+
     let gen = |sink: &mut dyn Sink| -> io::Result<()> {
         let reader = ChanReader {
             rx,
             buf: Vec::new(),
             pos: 0,
         };
-        let n = enc_streaming(reader, key_src, sb, sink, Some(total), on_progress)?;
+        let n = enc_streaming(reader, &opts.key_src, sb, sink, Some(total), on_progress)?;
         plain_len.store(n, Ordering::Relaxed);
         Ok(())
     };
     let r = match shell {
-        "jpg" => shells::enc_jpg(&out, gen).map_err(|e| e.to_string()),
-        "docx" => shells::enc_docx(&out, gen).map_err(|e| e.to_string()),
-        _ => shells::enc_png(&out, gen).map_err(|e| e.to_string()),
+        "jpg" => shells::enc_jpg(cover.as_deref(), &out, gen).map_err(|e| e.to_string()),
+        "docx" => shells::enc_docx(cover.as_deref(), &out, gen).map_err(|e| e.to_string()),
+        _ => shells::enc_png(cover.as_deref(), &out, gen).map_err(|e| e.to_string()),
     };
     let _ = packer.join();
     match r {
