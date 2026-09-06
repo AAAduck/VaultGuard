@@ -309,6 +309,25 @@ impl VaultApp {
                             res.entries,
                             paths::sz(res.plain_bytes)
                         )));
+                        // 内容清单：认证已通过，展示箱里到底有什么
+                        if !res.manifest.is_empty() {
+                            let _ = tx.send(Msg::Line("   ── 内容清单 ──".to_string()));
+                            for (name, sz, is_dir) in res.manifest.iter().take(16) {
+                                let tag = if *is_dir { "[目录]" } else { "[文件]" };
+                                let _ = tx.send(Msg::Line(format!(
+                                    "   {} {}（{}）",
+                                    tag,
+                                    name,
+                                    paths::sz(*sz)
+                                )));
+                            }
+                            if res.manifest.len() > 16 {
+                                let _ = tx.send(Msg::Line(format!(
+                                    "   …其余 {} 项省略",
+                                    res.manifest.len() - 16
+                                )));
+                            }
+                        }
                         for (name, hash) in res.hashes.iter().take(4) {
                             let _ = tx.send(Msg::Line(format!("   SHA256 {} {}", name, hash)));
                         }
@@ -529,20 +548,22 @@ impl VaultApp {
                             .size(9.5)
                             .color(BUSY_AMBER),
                     );
-                } else if self.passphrase.chars().count() < 8 {
-                    ui.label(
-                        egui::RichText::new("口令偏短，建议 12 位以上。口令遗忘后文件无法找回")
-                            .size(9.5)
-                            .color(BUSY_AMBER),
-                    );
                 } else {
+                    // 口令强度实时评估：常见弱口令 / 长度 / 字符类
+                    let (lv, msg) = pass_strength(&self.passphrase);
+                    let color = match lv {
+                        2 => ACCENT_TEXT,
+                        1 => BUSY_AMBER,
+                        _ => DANGER,
+                    };
                     ui.label(
                         egui::RichText::new(format!(
-                            "口令加密已就绪（Argon2id）· 钥匙指纹 {}",
+                            "{}（Argon2id）· 钥匙指纹 {}",
+                            msg,
                             crypto::pass_fingerprint(&self.passphrase)
                         ))
                         .size(9.5)
-                        .color(ACCENT_TEXT),
+                        .color(color),
                     );
                     ui.label(
                         egui::RichText::new("同一条口令指纹相同，可用于核对是否输错。口令遗忘后文件无法找回")
@@ -1162,6 +1183,45 @@ impl VaultApp {
 fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(11.0).strong().color(TEXT_MUTED));
     ui.add_space(3.0);
+}
+
+/// 口令强度评估：返回 (强度级 0弱/1中/2强, 说明)。
+fn pass_strength(pass: &str) -> (u8, &'static str) {
+    const COMMON: [&str; 10] = [
+        "123456",
+        "12345678",
+        "password",
+        "qwerty",
+        "111111",
+        "123456789",
+        "abc123",
+        "000000",
+        "admin",
+        "letmein",
+    ];
+    let len = pass.chars().count();
+    let mut classes = 0usize;
+    if pass.chars().any(|c| c.is_ascii_lowercase()) {
+        classes += 1;
+    }
+    if pass.chars().any(|c| c.is_ascii_uppercase()) {
+        classes += 1;
+    }
+    if pass.chars().any(|c| c.is_ascii_digit()) {
+        classes += 1;
+    }
+    if pass.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        classes += 1;
+    }
+    if COMMON.contains(&pass.to_lowercase().as_str()) || len < 6 {
+        (0, "口令偏弱：过于常见或太短，极易被猜出")
+    } else if len >= 12 && classes >= 3 {
+        (2, "口令强度高")
+    } else if len >= 8 && classes >= 2 {
+        (1, "口令强度中等，建议再加长度或字符种类")
+    } else {
+        (0, "口令偏弱：建议 12 位以上并混用大小写/数字/符号")
+    }
 }
 
 /// 伪装外壳卡片：名称 + 右侧 mono 徽标，第二行描述；选中态 emerald 描边。

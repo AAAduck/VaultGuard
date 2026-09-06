@@ -394,12 +394,14 @@ pub fn do_enc(
     }
 }
 
-/// 还原结果：目标路径、条目数、明文总字节、各文件 SHA-256（供用户记录核对）。
+/// 还原结果：目标路径、条目数、明文总字节、内容清单（认证通过后的 tar 条目）、各文件 SHA-256。
 #[derive(Debug)]
 pub struct DecResult {
     pub dst: PathBuf,
     pub entries: usize,
     pub plain_bytes: u64,
+    /// 内容清单：(名称, 字节, 是否目录)——来自认证通过的 tar 头
+    pub manifest: Vec<(String, u64, bool)>,
     pub hashes: Vec<(String, String)>, // (相对路径, sha256 hex)
 }
 
@@ -430,12 +432,14 @@ pub fn do_dec(
             110,
         );
         let (dst, n) = tarx::place(&tmp, &base, out_root).map_err(|e| e.to_string())?;
+        let manifest = tarx::list_file(&tp).unwrap_or_default();
         let mut hashes = Vec::new();
         collect_hashes(&dst, &mut hashes, 0);
         Ok(DecResult {
             dst,
             entries: n,
             plain_bytes: size,
+            manifest,
             hashes,
         })
     })();
