@@ -1,5 +1,7 @@
 # VaultGuard — 把文件变成一张"图片"的加密保险箱
 
+![CI](https://github.com/AAAduck/VaultGuard/actions/workflows/ci.yml/badge.svg)
+
 ## 这是个什么软件？
 
 一句话：**它能把你的私密文件变成一张看起来完全正常的图片（或 Word 文档），存网盘、发给别人都行；只有知道口令的你（或你指定的人），能用它把文件还原回来。**
@@ -101,7 +103,7 @@ VaultGuard.exe "D:\资料\项目文件夹" --png --password-stdin
 
 ### 构建与源码
 
-源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 9 个往返回归测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期、口令更换）。
+源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 11 个往返回归测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期、口令更换、选择性还原）。
 
 ### 文件说明
 

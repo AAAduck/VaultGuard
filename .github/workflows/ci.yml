@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: 测试 + 构建（Windows）
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: VaultGuard_rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 资源嵌入（图标 + 清单）依赖 zig 编译 .rc，build.rs 通过 ZIG_BIN 定位 zig
+      - uses: goto-bus-stop/setup-zig@v2
+      - name: 定位 zig（供 build.rs 使用）
+        shell: bash
+        run: echo "ZIG_BIN=$(which zig)" >> "$GITHUB_ENV"
+
+      # 本机 .cargo/config.toml 写死了本机 zig 链接器路径；CI 用 windows-msvc 默认工具链，无需该配置
+      - name: 移除本机专属 cargo 配置
+        run: Remove-Item .cargo/config.toml
+
+      - name: 运行测试
+        run: cargo test --release --locked
+
+      - name: 构建 exe
+        run: cargo build --release --locked
+
+  release:
+    name: 发布（打 tag 时）
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: VaultGuard_rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: goto-bus-stop/setup-zig@v2
+      - name: 定位 zig（供 build.rs 使用）
+        shell: bash
+        run: echo "ZIG_BIN=$(which zig)" >> "$GITHUB_ENV"
+      - name: 移除本机专属 cargo 配置
+        run: Remove-Item .cargo/config.toml
+      - name: 构建 exe
+        run: cargo build --release --locked
+      - name: 打包产物 + SHA256SUMS
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/vaultguard.exe dist/VaultGuard.exe
+          (cd dist && sha256sum VaultGuard.exe > SHA256SUMS)
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: VaultGuard_rs/dist/*
+          generate_release_notes: true
