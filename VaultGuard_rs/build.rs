@@ -78,12 +78,16 @@ fn embed_resources() -> Result<(), String> {
 
     // .rc 内容为 UTF-8（路径含中文），配合 /c65001 让 resinator 按正确代码页解码
     // VERSIONINFO 给 exe 补身份信息（公司/产品/版本）——无版本资源的"匿名二进制"是杀软启发式误报的高发特征
+    // 注意：.rc 字符串字面量里反斜杠是转义前缀（CI 路径 D:\a\... 的 \a 会被当转义符吃掉导致打不开文件），
+    // 所以这里把路径统一换成正斜杠（resinator 与 Windows 均接受）。
     let (vmaj, vmin, vpat) = version_triple();
     let ver_str = format!("{vmaj}.{vmin}.{vpat}");
+    let ico_rc = ico.display().to_string().replace('\\', "/");
+    let manifest_rc = manifest.display().to_string().replace('\\', "/");
     let rc = format!(
         "1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO\nFILEVERSION {vmaj},{vmin},{vpat},0\nPRODUCTVERSION {vmaj},{vmin},{vpat},0\nFILEOS 0x40004\nFILETYPE 0x1\nBEGIN\n  BLOCK \"StringFileInfo\"\n  BEGIN\n    BLOCK \"080404b0\"\n    BEGIN\n      VALUE \"CompanyName\", \"VaultGuard\"\n      VALUE \"FileDescription\", \"VaultGuard - 网盘伪装加密保险箱\"\n      VALUE \"FileVersion\", \"{ver_str}\"\n      VALUE \"ProductName\", \"VaultGuard\"\n      VALUE \"ProductVersion\", \"{ver_str}\"\n      VALUE \"OriginalFilename\", \"VaultGuard.exe\"\n    END\n  END\n  BLOCK \"VarFileInfo\"\n  BEGIN\n    VALUE \"Translation\", 0x0804, 1200\n  END\nEND\n",
-        ico.display(),
-        manifest.display()
+        ico_rc,
+        manifest_rc
     );
     if !res_path.is_file() {
         fs::write(&rc_path, rc).map_err(|e| format!("write .rc: {e}"))?;

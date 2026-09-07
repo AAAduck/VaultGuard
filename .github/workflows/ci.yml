@@ -37,6 +37,13 @@ jobs:
       - name: 构建 exe
         run: cargo build --release --locked
 
+      - name: 校验版本资源已嵌入（防静默回归）
+        shell: pwsh
+        run: |
+          $v = (Get-Item target/release/vaultguard.exe).VersionInfo
+          if ([string]::IsNullOrEmpty($v.FileVersion)) { throw "VERSIONINFO 未嵌入：资源嵌入被跳过，产物缺少图标/版本信息" }
+          Write-Output "FileVersion=$($v.FileVersion) Company=$($v.CompanyName)"
+
   release:
     name: 发布（打 tag 时）
     if: startsWith(github.ref, 'refs/tags/v')
@@ -56,6 +63,12 @@ jobs:
         run: Remove-Item .cargo/config.toml
       - name: 构建 exe
         run: cargo build --release --locked
+      - name: 校验版本资源已嵌入（防静默回归）
+        shell: pwsh
+        run: |
+          $v = (Get-Item target/release/vaultguard.exe).VersionInfo
+          if ([string]::IsNullOrEmpty($v.FileVersion)) { throw "VERSIONINFO 未嵌入：资源嵌入被跳过，产物缺少图标/版本信息" }
+          Write-Output "FileVersion=$($v.FileVersion) Company=$($v.CompanyName)"
       - name: 打包产物 + SHA256SUMS
         shell: bash
         run: |
