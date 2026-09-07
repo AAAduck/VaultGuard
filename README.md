@@ -101,7 +101,7 @@ VaultGuard.exe "D:\资料\项目文件夹" --png --password-stdin
 
 ### 构建与源码
 
-源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 7 个往返回归测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期）。
+源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 9 个往返回归测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期、口令更换）。
 
 ### 文件说明
 
@@ -113,6 +113,12 @@ outputs/                # 默认输出目录
 ```
 
 构建与源码说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。运行程序不需要安装 Rust、Python、Zig 或其他运行时依赖。
+
+## 版本记录
+
+- **v1.2（2026-09）**：选择性还原（单文件还原先预览、可勾选部分条目落位）；日志加时间戳；「打开输出目录」按钮；处理中时任务栏显示「处理中…」。
+- **v1.1（2026-09）**：还原清单预览（认证后列出容器内容）；口令强度实时评估。
+- **v1.0（2026-09）**：首发 —— 伪装加密（PNG/JPG/DOCX，可自定义封面）、口令加密与内置密钥、隐私保险箱、口令优先交互（双输入确认/生成器/指纹核对/显隐切换/跳过可反悔）、命令行与拖拽使用。
 
 ## 免责声明
 
