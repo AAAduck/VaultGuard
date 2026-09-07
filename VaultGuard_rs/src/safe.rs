@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::crypto::{aad_for, ct_eq, derive_v3, ArgonParams, Gcm, NONCE_SZ, TAG_SZ};
+use crate::crypto::{ct_eq, derive_v3, ArgonParams, Gcm, NONCE_SZ, TAG_SZ};
 use crate::paths::{cleanup, mktmpdir, safe_name, uniq};
 use crate::tarx;
 
