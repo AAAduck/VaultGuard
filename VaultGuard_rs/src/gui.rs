@@ -66,6 +66,8 @@ enum VaultTask {
     Open(String, String),
     Add(Vec<PathBuf>),
     Remove(Vec<String>),
+    Rename(String, String),
+    MoveEntry(String, String),
     ExportAll(String),
     ExportSel(Vec<String>, String),
     ChangePass(String),
@@ -97,6 +99,8 @@ struct VaultApp {
     dec_origin: Option<PathBuf>, // 预览对应的源文件路径（用于日志展示）
     // 任务栏标题状态跟踪：避免每帧重复发送 ViewportCommand::Title
     title_busy: bool,
+    // 口令到期提醒（90 天）
+    pass_tip_due: bool,
 }
 
 struct VaultPage {
@@ -104,6 +108,10 @@ struct VaultPage {
     pass: String,
     pass2: String,
     changing: bool, // 更换口令模式
+    renaming: bool, // 重命名输入行
+    ren_val: String,
+    moving: bool, // 移动输入行
+    mv_val: String,
     busy: bool,
     session: Option<safe::Session>,
     sel: HashSet<String>,
@@ -119,6 +127,10 @@ impl VaultPage {
             pass: String::new(),
             pass2: String::new(),
             changing: false,
+            renaming: false,
+            ren_val: String::new(),
+            moving: false,
+            mv_val: String::new(),
             busy: false,
             session: None,
             sel: HashSet::new(),
@@ -161,6 +173,7 @@ impl VaultApp {
             dec_sel: HashSet::new(),
             dec_origin: None,
             title_busy: false,
+            pass_tip_due: paths::pass_tip_due(),
         }
     }
 
@@ -240,6 +253,9 @@ impl VaultApp {
         if !pass_ok {
             self.log("请先设置口令（两次输入需一致），或点击「跳过口令」。");
             return;
+        }
+        if !self.passphrase.is_empty() {
+            paths::pass_tip_touch();
         }
         let items = self.items.clone();
         let shell = SHELLS[self.shell];
@@ -884,7 +900,7 @@ impl VaultApp {
                                 self.passphrase.clone()
                             };
                             let text = format!(
-                                "【VaultGuard 分享说明】\n文件：{}\n口令：{}\n接收方步骤：打开 VaultGuard.exe → 拖入本文件 → 输入口令 → 还原。\n安全提醒：口令请勿与文件走同一渠道发送；口令遗忘无法找回。",
+                                "【VaultGuard 分享说明】\n文件：{}\n口令：{}\n接收方步骤：打开 VaultGuard.exe → 拖入本文件 → 输入口令 → 还原。\n下载：https://github.com/AAAduck/VaultGuard/releases （或由发送方直接提供 VaultGuard.exe）\n安全提醒：口令请勿与文件走同一渠道发送；口令遗忘无法找回。",
                                 out.display(),
                                 pass_note
                             );
@@ -905,6 +921,35 @@ impl VaultApp {
             )
             .show(ctx, |ui| {
                 let dragging = ui.input(|i| !i.raw.hovered_files.is_empty());
+
+                // ── 口令到期提醒（90 天，可关闭/确认）──
+                if self.pass_tip_due {
+                    egui::Frame::default()
+                        .fill(Color32::from_rgb(0x1D, 0x18, 0x08))
+                        .stroke(egui::Stroke::new(1.0, BUSY_AMBER))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("距上次设置/更换口令已超过 90 天，建议更换。")
+                                        .size(11.0)
+                                        .color(BUSY_AMBER),
+                                );
+                                if ui.button("已更换口令").clicked() {
+                                    paths::pass_tip_touch();
+                                    self.pass_tip_due = false;
+                                    self.log("口令更换时间已记录，90 天后再次提醒。");
+                                }
+                                if ui.button("关闭提醒").clicked() {
+                                    paths::pass_tip_disable();
+                                    self.pass_tip_due = false;
+                                    self.log("口令更换提醒已关闭（下次设置口令时重新开启）。");
+                                }
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
 
                 // ── 文件列表卡片 ──
                 egui::Frame::default()
@@ -1290,6 +1335,32 @@ impl VaultApp {
                         std::thread::spawn(move || vault_worker(sess, task, tx));
                     }
                     if ui
+                        .add_enabled(
+                            !busy && self.vp.sel.len() == 1,
+                            egui::Button::new("重命名").min_size(egui::vec2(0.0, 28.0)),
+                        )
+                        .clicked()
+                    {
+                        if let Some(n) = self.vp.sel.iter().next().cloned() {
+                            self.vp.renaming = true;
+                            self.vp.ren_val = n;
+                            self.vp.moving = false;
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            !busy && self.vp.sel.len() == 1,
+                            egui::Button::new("移动").min_size(egui::vec2(0.0, 28.0)),
+                        )
+                        .clicked()
+                    {
+                        if self.vp.sel.len() == 1 {
+                            self.vp.moving = true;
+                            self.vp.mv_val = String::new();
+                            self.vp.renaming = false;
+                        }
+                    }
+                    if ui
                         .add_enabled(!busy, ghost_button(if self.vp.changing { "取消换口令" } else { "更换口令" }))
                         .clicked()
                     {
@@ -1345,6 +1416,90 @@ impl VaultApp {
                     });
                     ui.label(
                         egui::RichText::new("口令遗忘后保险箱无法打开，请牢记新口令。更换会重写整个容器。")
+                            .size(9.5)
+                            .color(TEXT_FAINT),
+                    );
+                    ui.add_space(6.0);
+                }
+
+                // ── 重命名 / 移动输入行 ──
+                if self.vp.renaming {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("重命名为").size(11.5).color(TEXT_SUB));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.vp.ren_val)
+                                .desired_width(width / 2.0)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        let from = self
+                            .vp
+                            .sel
+                            .iter()
+                            .next()
+                            .cloned()
+                            .unwrap_or_default();
+                        if ui
+                            .add_enabled(
+                                !busy && !from.is_empty() && !self.vp.ren_val.trim().is_empty(),
+                                primary_button("确定重命名").min_size(egui::vec2(0.0, 26.0)),
+                            )
+                            .clicked()
+                        {
+                            let to = self.vp.ren_val.trim().to_string();
+                            let task = VaultTask::Rename(from.clone(), to);
+                            let sess = self.vp.session.take();
+                            self.vp.busy = true;
+                            self.vp.renaming = false;
+                            self.vp.sel.clear();
+                            let tx = self.vp.tx.clone();
+                            std::thread::spawn(move || vault_worker(sess, task, tx));
+                        }
+                        if ui.add(ghost_button("取消")).clicked() {
+                            self.vp.renaming = false;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("只改名字、不改所在目录；移动位置请用「移动」。")
+                            .size(9.5)
+                            .color(TEXT_FAINT),
+                    );
+                    ui.add_space(6.0);
+                }
+                if self.vp.moving {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("移动到目录").size(11.5).color(TEXT_SUB));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.vp.mv_val)
+                                .desired_width(width / 2.0)
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("目标目录，留空 = 根目录（如 工作/2026）"),
+                        );
+                        let name = self
+                            .vp
+                            .sel
+                            .iter()
+                            .next()
+                            .cloned()
+                            .unwrap_or_default();
+                        if ui
+                            .add_enabled(!busy && !name.is_empty(), primary_button("确定移动").min_size(egui::vec2(0.0, 26.0)))
+                            .clicked()
+                        {
+                            let dir = self.vp.mv_val.trim().to_string();
+                            let task = VaultTask::MoveEntry(name.clone(), dir);
+                            let sess = self.vp.session.take();
+                            self.vp.busy = true;
+                            self.vp.moving = false;
+                            self.vp.sel.clear();
+                            let tx = self.vp.tx.clone();
+                            std::thread::spawn(move || vault_worker(sess, task, tx));
+                        }
+                        if ui.add(ghost_button("取消")).clicked() {
+                            self.vp.moving = false;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("目标目录不存在会自动创建；重名自动加 _2/_3 后缀。")
                             .size(9.5)
                             .color(TEXT_FAINT),
                     );
@@ -1743,6 +1898,40 @@ fn vault_worker(
             }
             None => Err("保险箱未打开".into()),
         },
+        VaultTask::Rename(from, to) => match sess.as_mut() {
+            Some(s) => s
+                .rename_entry(&from, &to)
+                .and_then(|_| {
+                    line(format!("已重命名 {} -> {}，正在重新加密保存…", from, to));
+                    s.save(&save_prog)
+                })
+                .map(|_| format!("已重命名 {} -> {}", from, to))
+                .map_err(|e| e.to_string()),
+            None => Err("保险箱未打开".into()),
+        },
+        VaultTask::MoveEntry(name, dir) => match sess.as_mut() {
+            Some(s) => s
+                .move_entry(&name, &dir)
+                .and_then(|_| {
+                    let dst = if dir.is_empty() {
+                        "根目录".to_string()
+                    } else {
+                        dir.clone()
+                    };
+                    line(format!("已移动 {} -> {}，正在重新加密保存…", name, dst));
+                    s.save(&save_prog)
+                })
+                .map(|_| {
+                    let dst = if dir.is_empty() {
+                        "根目录".to_string()
+                    } else {
+                        dir.clone()
+                    };
+                    format!("已移动 {} 到 {}", name, dst)
+                })
+                .map_err(|e| e.to_string()),
+            None => Err("保险箱未打开".into()),
+        },
         VaultTask::ExportAll(out) => match sess.as_ref() {
             Some(s) => s
                 .export(Path::new(&out), &prog)
@@ -1760,7 +1949,10 @@ fn vault_worker(
         VaultTask::ChangePass(new) => match sess.as_mut() {
             Some(s) => s
                 .change_password(&new)
-                .map(|_| "口令已更换并重新加密保存".to_string())
+                .map(|_| {
+                    paths::pass_tip_touch();
+                    "口令已更换并重新加密保存".to_string()
+                })
                 .map_err(|e| e.to_string()),
             None => Err("保险箱未打开".into()),
         },

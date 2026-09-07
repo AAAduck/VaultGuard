@@ -144,6 +144,91 @@ impl Session {
         Ok(removed)
     }
 
+    /// 重命名条目（顶层或嵌套均可，只改名字不改所在目录）。保存由调用方另行触发。
+    pub fn rename_entry(&mut self, from: &str, to: &str) -> io::Result<()> {
+        if !valid_rel_path(from) || !valid_rel_path(to) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "路径不合法（不能为空/含 .. 或反斜杠）",
+            ));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let src = self.tree.join(from);
+        if !src.exists() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "条目不存在"));
+        }
+        let dst = self.tree.join(to);
+        if dst.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "目标名称已存在",
+            ));
+        }
+        if let Some(parent) = dst.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "目标目录不存在（移动请用「移动」操作）",
+                ));
+            }
+        }
+        std::fs::rename(&src, &dst)?;
+        self.refresh_entries();
+        Ok(())
+    }
+
+    /// 移动条目到目录前缀（空串 = 移到根目录；目标目录不存在自动创建）。
+    /// 目标重名自动加 _2/_3 后缀。保存由调用方另行触发。
+    pub fn move_entry(&mut self, name: &str, dest_dir: &str) -> io::Result<()> {
+        if !valid_rel_path(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "路径不合法",
+            ));
+        }
+        let clean = dest_dir.trim().trim_matches('/').to_string();
+        if !clean.is_empty() && !valid_rel_path(&clean) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "目标目录不合法",
+            ));
+        }
+        let base = name.rsplit('/').next().unwrap_or(name).to_string();
+        let target_plain = if clean.is_empty() {
+            base.clone()
+        } else {
+            format!("{}/{}", clean, base)
+        };
+        if target_plain == name {
+            return Ok(()); // 原地移动 = 无操作
+        }
+        if target_plain.starts_with(&format!("{}/", name)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "不能移动到自身子目录",
+            ));
+        }
+        if !clean.is_empty() {
+            std::fs::create_dir_all(self.tree.join(&clean))?;
+        }
+        let mut target = target_plain;
+        let mut i = 2;
+        while self.tree.join(&target).exists() {
+            let (stem, ext) = split_ext(&base);
+            target = if clean.is_empty() {
+                format!("{}_{}{}", stem, i, ext)
+            } else {
+                format!("{}/{}_{}{}", clean, stem, i, ext)
+            };
+            i += 1;
+        }
+        std::fs::rename(self.tree.join(name), self.tree.join(&target))?;
+        self.refresh_entries();
+        Ok(())
+    }
+
     /// 保存：工作树整箱重加密 -> 写临时容器 -> 自校验 -> 原子替换旧箱。
     pub fn save(&mut self, prog: &dyn Fn(u8)) -> io::Result<()> {
         let tmp_c = self.path.with_extension("vgsafe.tmp");
@@ -459,4 +544,13 @@ fn split_ext(name: &str) -> (String, String) {
         Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
         _ => (name.to_string(), String::new()),
     }
+}
+
+/// 保险箱内相对路径合法性：非空、无头尾斜杠、无空段 / . / .. / 反斜杠。
+fn valid_rel_path(p: &str) -> bool {
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !p.ends_with('/')
+        && !p.contains('\\')
+        && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }

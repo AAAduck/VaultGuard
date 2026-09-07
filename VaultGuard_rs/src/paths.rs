@@ -289,3 +289,98 @@ pub fn reg_set_shell(s: &str) {
         let _ = k.0.set_value("shell", &s);
     }
 }
+
+// ── 口令更换提醒（每 90 天，可关闭）───────────────────────────────
+
+pub const PASS_TIP_DAYS: i64 = 90;
+const PASS_TIP_DAY_SECS: i64 = PASS_TIP_DAYS * 86_400;
+
+fn pass_tip_file() -> PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| out_root().join(".config"));
+    base.join(APP).join("pass_tip.json")
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 读取提醒状态：(last 时间戳, disabled)。文件缺失按"刚设置过"处理（首启不打扰）。
+pub fn pass_tip_load() -> (i64, bool) {
+    let s = match std::fs::read_to_string(pass_tip_file()) {
+        Ok(s) => s,
+        Err(_) => return (now_secs(), false),
+    };
+    let mut last = 0i64;
+    let mut disabled = false;
+    if let Some(i) = s.find("\"last\":") {
+        let rest = &s[i + 7..];
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        last = rest[..end].parse().unwrap_or(0);
+    }
+    if let Some(i) = s.find("\"disabled\":") {
+        let rest = &s[i + 11..];
+        disabled = rest.trim_start().starts_with("true");
+    }
+    if last == 0 {
+        return (now_secs(), disabled);
+    }
+    (last, disabled)
+}
+
+fn pass_tip_save(last: i64, disabled: bool) {
+    let f = pass_tip_file();
+    if let Some(d) = f.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(f, format!("{{\"last\":{},\"disabled\":{}}}", last, disabled));
+}
+
+/// 记录"已设置/更换口令"（重置 90 天周期，同时解除关闭状态）。
+pub fn pass_tip_touch() {
+    pass_tip_save(now_secs(), false);
+}
+
+/// 关闭提醒（保持不打扰，直到下次设置口令重新开启）。
+pub fn pass_tip_disable() {
+    let (last, _) = pass_tip_load();
+    pass_tip_save(last, true);
+}
+
+/// 纯逻辑：距上次设置/更换是否已超过 90 天且未关闭。
+pub fn pass_tip_due_state(last: i64, now: i64, disabled: bool) -> bool {
+    !disabled && now.saturating_sub(last) >= PASS_TIP_DAY_SECS
+}
+
+/// 当前是否应提醒（读取文件状态后判定）。
+pub fn pass_tip_due() -> bool {
+    let (last, disabled) = pass_tip_load();
+    pass_tip_due_state(last, now_secs(), disabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pass_tip_due_logic() {
+        let now = 1_800_000_000i64; // 任意基准时刻
+        assert!(!pass_tip_due_state(now, now, false), "刚设置不应提醒");
+        assert!(
+            !pass_tip_due_state(now - PASS_TIP_DAY_SECS + 60, now, false),
+            "未满 90 天不应提醒"
+        );
+        assert!(
+            pass_tip_due_state(now - PASS_TIP_DAY_SECS - 1, now, false),
+            "超过 90 天应提醒"
+        );
+        assert!(
+            !pass_tip_due_state(now - PASS_TIP_DAY_SECS * 5, now, true),
+            "已关闭不应提醒"
+        );
+    }
+}

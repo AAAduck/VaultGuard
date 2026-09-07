@@ -11,3 +11,6 @@ VG_OUT/
 
 # 发布二进制不进仓库（每次构建重新生成）
 VaultGuard.exe
+
+# 运行输出目录
+outputs/
