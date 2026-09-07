@@ -19,6 +19,17 @@ fn version_triple() -> (u32, u32, u32) {
     (get(parts.next()), get(parts.next()), get(parts.next()))
 }
 
+/// 把 MSYS/Git Bash 风格路径（/c/hostedtoolcache/.../zig）规范为 Windows 路径，
+/// 否则 Path::is_file 与 Command::new 都无法识别（CI 上 `which zig` 输出正是这种形式）。
+fn resolve_zig(zig: &str) -> PathBuf {
+    let b = zig.as_bytes();
+    if zig.starts_with('/') && b.len() >= 3 && b[2] == b'/' && b[1].is_ascii_alphabetic() {
+        let drive = (b[1] as char).to_ascii_uppercase();
+        return PathBuf::from(format!("{}:\\{}", drive, &zig[3..]).replace('/', "\\"));
+    }
+    PathBuf::from(zig)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=VaultGuard.exe.manifest");
@@ -43,8 +54,9 @@ fn embed_resources() -> Result<(), String> {
     }
 
     let zig = env::var("ZIG_BIN").unwrap_or_else(|_| ZIG_FALLBACK.to_string());
-    if !Path::new(&zig).is_file() {
-        return Err(format!("zig not found at {zig} (set ZIG_BIN to override)"));
+    let zig = resolve_zig(&zig);
+    if !zig.is_file() {
+        return Err(format!("zig not found at {} (set ZIG_BIN to override)", zig.display()));
     }
 
     // .res 文件名带指纹（图标+清单）：内容变化 -> 文件名变化 -> 链接参数变化 -> cargo 必然重链接
@@ -84,8 +96,7 @@ fn embed_resources() -> Result<(), String> {
                 &rc_path.display().to_string(),
             ])
             .output()
-            .map_err(|e| format!("run zig rc: {e}"))?;
-        if !out.status.success() {
+            .map_err(|e| format!("run zig rc: {e}"))?;        if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             let _ = fs::remove_file(&rc_path);
             return Err(format!("zig rc failed: {}", err.trim()));

@@ -20,11 +20,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # 资源嵌入（图标 + 清单）依赖 zig 编译 .rc，build.rs 通过 ZIG_BIN 定位 zig
+      # 资源嵌入（图标 + 清单 + 版本信息）依赖 zig 编译 .rc，build.rs 通过 ZIG_BIN 定位 zig。
+      # 用 pwsh 取原生 Windows 路径（bash 的 `which` 返回 /c/... MSYS 路径，build.rs 无法识别）
       - uses: goto-bus-stop/setup-zig@v2
       - name: 定位 zig（供 build.rs 使用）
-        shell: bash
-        run: echo "ZIG_BIN=$(which zig)" >> "$GITHUB_ENV"
+        shell: pwsh
+        run: echo "ZIG_BIN=$((Get-Command zig).Source)" >> $env:GITHUB_ENV
 
       # 本机 .cargo/config.toml 写死了本机 zig 链接器路径；CI 用 windows-msvc 默认工具链，无需该配置
       - name: 移除本机专属 cargo 配置
@@ -49,8 +50,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: goto-bus-stop/setup-zig@v2
       - name: 定位 zig（供 build.rs 使用）
-        shell: bash
-        run: echo "ZIG_BIN=$(which zig)" >> "$GITHUB_ENV"
+        shell: pwsh
+        run: echo "ZIG_BIN=$((Get-Command zig).Source)" >> $env:GITHUB_ENV
       - name: 移除本机专属 cargo 配置
         run: Remove-Item .cargo/config.toml
       - name: 构建 exe
