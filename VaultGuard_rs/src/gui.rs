@@ -1032,17 +1032,27 @@ impl VaultApp {
 
                 // ── 上次输出快捷入口 ──
                 if let Some(out) = &self.last_output {
-                    ui.horizontal(|ui| {
-                        if ui.add(ghost_button("打开输出目录")).clicked() {
-                            open_in_explorer(out);
-                        }
-                        ui.label(
-                            egui::RichText::new(format!("上次输出: {}", out.display()))
-                                .size(10.0)
-                                .color(TEXT_FAINT)
-                                .monospace(),
-                        );
-                    });
+                    egui::Frame::default()
+                        .fill(CARD)
+                        .stroke(egui::Stroke::new(1.0, ACCENT))
+                        .rounding(10.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(primary_button("打开输出目录").min_size(egui::vec2(0.0, 30.0)))
+                                    .clicked()
+                                {
+                                    open_in_explorer(out);
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("上次输出: {}", out.display()))
+                                        .size(10.0)
+                                        .color(TEXT_FAINT)
+                                        .monospace(),
+                                );
+                            });
+                        });
                     ui.add_space(4.0);
                 }
 

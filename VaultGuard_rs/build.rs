@@ -11,6 +11,14 @@ use std::process::Command;
 
 const ZIG_FALLBACK: &str = "D:\\ZigTools\\zig0141\\zig-x86_64-windows-0.14.1\\zig.exe";
 
+/// 从 CARGO_PKG_VERSION（如 "1.3.1"）拆出版本三元组。
+fn version_triple() -> (u32, u32, u32) {
+    let v = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+    let mut parts = v.split('.');
+    let get = |p: Option<&str>| p.and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    (get(parts.next()), get(parts.next()), get(parts.next()))
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=VaultGuard.exe.manifest");
@@ -57,8 +65,11 @@ fn embed_resources() -> Result<(), String> {
     let rc_path = out_dir.join(format!("vg_{stamp}.rc"));
 
     // .rc 内容为 UTF-8（路径含中文），配合 /c65001 让 resinator 按正确代码页解码
+    // VERSIONINFO 给 exe 补身份信息（公司/产品/版本）——无版本资源的"匿名二进制"是杀软启发式误报的高发特征
+    let (vmaj, vmin, vpat) = version_triple();
+    let ver_str = format!("{vmaj}.{vmin}.{vpat}");
     let rc = format!(
-        "1 ICON \"{}\"\n1 24 \"{}\"\n",
+        "1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO\nFILEVERSION {vmaj},{vmin},{vpat},0\nPRODUCTVERSION {vmaj},{vmin},{vpat},0\nFILEOS 0x40004\nFILETYPE 0x1\nBEGIN\n  BLOCK \"StringFileInfo\"\n  BEGIN\n    BLOCK \"080404b0\"\n    BEGIN\n      VALUE \"CompanyName\", \"VaultGuard\"\n      VALUE \"FileDescription\", \"VaultGuard - 网盘伪装加密保险箱\"\n      VALUE \"FileVersion\", \"{ver_str}\"\n      VALUE \"ProductName\", \"VaultGuard\"\n      VALUE \"ProductVersion\", \"{ver_str}\"\n      VALUE \"OriginalFilename\", \"VaultGuard.exe\"\n    END\n  END\n  BLOCK \"VarFileInfo\"\n  BEGIN\n    VALUE \"Translation\", 0x0804, 1200\n  END\nEND\n",
         ico.display(),
         manifest.display()
     );
