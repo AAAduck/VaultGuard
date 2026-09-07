@@ -268,7 +268,7 @@ fn place_inner(
 ) -> io::Result<(PathBuf, usize)> {
     let staged = tmp.join("x");
     let tp = tmp.join("payload.tar");
-    let (tops, _total) = unpack(&tp, &staged)?;
+    let (tops, total) = unpack(&tp, &staged)?;
     std::fs::create_dir_all(out)?;
 
     // 选中的顶层条目；filter=None 表示全选
@@ -296,7 +296,8 @@ fn place_inner(
         match force_move(&src, &dst) {
             Ok(_) => {
                 let _ = std::fs::remove_dir_all(&staged);
-                return Ok((dst, 1));
+                // 无过滤时保持旧语义：返回 tar 总条目数；过滤时返回实际落位顶层条目数
+                return Ok((dst, if filter.is_none() { total } else { 1 }));
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&staged);
@@ -321,7 +322,8 @@ fn place_inner(
         moved += 1;
     }
     let _ = std::fs::remove_dir_all(&staged);
-    Ok((dst, moved))
+    // 无过滤时保持旧语义：返回 tar 总条目数；过滤时返回实际落位顶层条目数
+    Ok((dst, if filter.is_none() { total } else { moved }))
 }
 
 #[allow(dead_code)]
