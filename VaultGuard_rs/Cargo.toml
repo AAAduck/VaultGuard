@@ -41,4 +41,4 @@ winreg = "0.52"
 rfd = "0.14"
 rpassword = "7"
 eframe = { version = "0.28", default-features = false, features = ["glow", "default_fonts", "persistence"] }
-windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Console", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Foundation", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }

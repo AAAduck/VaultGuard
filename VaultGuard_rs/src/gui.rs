@@ -47,6 +47,7 @@ enum Msg {
     Line(String),
     Pct(u8),
     Done(Option<PathBuf>), // 加密/还原完成（携带产物路径）
+    PreviewReady(engine::DecPreview), // 解密预览就绪（认证通过，等待用户选择落位范围）
 }
 
 enum VMsg {
@@ -90,6 +91,12 @@ struct VaultApp {
     vault_count: usize,
     page: Page,
     vp: VaultPage,
+    // 选择性还原：解密预览就绪后，存放在此等待用户勾选落位
+    dec_preview: Option<engine::DecPreview>,
+    dec_sel: HashSet<String>,
+    dec_origin: Option<PathBuf>, // 预览对应的源文件路径（用于日志展示）
+    // 任务栏标题状态跟踪：避免每帧重复发送 ViewportCommand::Title
+    title_busy: bool,
 }
 
 struct VaultPage {
@@ -150,11 +157,15 @@ impl VaultApp {
             vault_count: 0,
             page: Page::Disguise,
             vp: VaultPage::new(),
+            dec_preview: None,
+            dec_sel: HashSet::new(),
+            dec_origin: None,
+            title_busy: false,
         }
     }
 
     fn log(&mut self, line: &str) {
-        self.logs.push(line.to_string());
+        self.logs.push(format!("[{}] {}", now_hms(), line));
         if self.logs.len() > 800 {
             self.logs.remove(0);
         }
@@ -172,6 +183,23 @@ impl VaultApp {
                         self.last_output = Some(p);
                     }
                     self.log("后台任务已结束，可继续操作。");
+                }
+                Msg::PreviewReady(preview) => {
+                    self.busy = false;
+                    self.progress = None;
+                    // 解密预览就绪：存入 dec_preview 等待用户勾选落位
+                    let tops = engine::top_entries(&preview.manifest);
+                    let n = tops.len();
+                    self.dec_sel.clear();
+                    // 默认全选，用户可取消不需要的
+                    for (name, _, _) in &tops {
+                        self.dec_sel.insert(name.clone());
+                    }
+                    self.log(&format!(
+                        "解密完成，认证通过：{} 个顶层条目。请在下方勾选要落位的内容。",
+                        n
+                    ));
+                    self.dec_preview = Some(preview);
                 }
             }
         }
@@ -268,6 +296,13 @@ impl VaultApp {
             self.log("已有任务在后台处理，请稍候。");
             return;
         }
+        // 若有未落位的预览，先丢弃（用户重新点了还原）
+        if self.dec_preview.is_some() {
+            self.dec_preview = None;
+            self.dec_sel.clear();
+            self.dec_origin = None;
+            self.log("已放弃上一次的解密预览。");
+        }
         let vaults: Vec<PathBuf> = self
             .items
             .iter()
@@ -280,6 +315,37 @@ impl VaultApp {
         }
         let out_dir = PathBuf::from(self.out_dir.trim());
         let pass: Option<String> = Some(self.passphrase.clone()).filter(|s| !s.is_empty());
+
+        // 单文件：走两阶段（预览 → 用户勾选 → 落位），支持选择性还原
+        if vaults.len() == 1 {
+            let v = vaults[0].clone();
+            let tx = self.tx.clone();
+            self.busy = true;
+            self.dec_origin = Some(v.clone());
+            self.log(&format!(">>> 解密 {}（认证后可勾选落位）…", v.display()));
+            std::thread::spawn(move || {
+                let prog = |d: u64, t: u64| {
+                    let pct = if t == 0 {
+                        0
+                    } else {
+                        (d.min(t) * 100 / t).min(99) as u8
+                    };
+                    let _ = tx.send(Msg::Pct(pct));
+                };
+                match engine::do_dec_preview(&v, pass.as_deref(), Some(&prog)) {
+                    Ok(preview) => {
+                        let _ = tx.send(Msg::PreviewReady(preview));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Msg::Line(format!("失败 {}: {}", v.display(), e)));
+                        let _ = tx.send(Msg::Done(None));
+                    }
+                }
+            });
+            return;
+        }
+
+        // 多文件：全量还原（保持原行为）
         let tx = self.tx.clone();
         self.busy = true;
         self.log(&format!(">>> 还原 {} 个加密文件…", vaults.len()));
@@ -364,6 +430,68 @@ impl VaultApp {
             }
         }
         self.items = kept; // 移除的正是被勾选的项，选择集随之清空
+    }
+
+    /// 从解密预览落位：filter=None 全量，Some 只落位选中的顶层条目。
+    fn run_dec_place(&mut self, filter: Option<Vec<String>>) {
+        let preview = match self.dec_preview.take() {
+            Some(p) => p,
+            None => {
+                self.log("没有待落位的解密预览。");
+                return;
+            }
+        };
+        let out_dir = PathBuf::from(self.out_dir.trim());
+        let origin = self.dec_origin.clone();
+        let tx = self.tx.clone();
+        self.busy = true;
+        self.dec_sel.clear();
+        let label = match &filter {
+            None => "全部落位".to_string(),
+            Some(s) => format!("落位选中 {} 项", s.len()),
+        };
+        self.log(&format!(">>> {}…", label));
+        std::thread::spawn(move || {
+            let res = engine::do_dec_place(preview, &out_dir, filter.as_deref());
+            match res {
+                Ok(r) => {
+                    let _ = tx.send(Msg::Line(format!(
+                        "落位 {} -> {}（{} 项，明文 {}）",
+                        origin
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        r.dst.display(),
+                        r.entries,
+                        paths::sz(r.plain_bytes)
+                    )));
+                    for (name, hash) in r.hashes.iter().take(4) {
+                        let _ = tx.send(Msg::Line(format!("   SHA256 {} {}", name, hash)));
+                    }
+                    if r.hashes.len() > 4 {
+                        let _ = tx.send(Msg::Line(format!(
+                            "   …其余 {} 个文件哈希省略",
+                            r.hashes.len() - 4
+                        )));
+                    }
+                    let _ = tx.send(Msg::Done(Some(r.dst)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Line(format!("落位失败: {}", e)));
+                    let _ = tx.send(Msg::Done(None));
+                }
+            }
+        });
+    }
+
+    /// 放弃当前解密预览（Drop 擦除临时明文）。
+    fn cancel_dec_preview(&mut self) {
+        if self.dec_preview.is_some() {
+            self.dec_preview = None;
+            self.dec_sel.clear();
+            self.dec_origin = None;
+            self.log("已放弃解密预览，临时数据已擦除。");
+        }
     }
 
     fn ui_header(&mut self, ctx: &egui::Context) {
@@ -850,7 +978,137 @@ impl VaultApp {
                     });
 
                 ui.add_space(10.0);
+
+                // ── 选择性还原预览面板（解密就绪后出现）──
+                if self.dec_preview.is_some() {
+                    self.ui_dec_preview(ui);
+                    ui.add_space(10.0);
+                }
+
+                // ── 上次输出快捷入口 ──
+                if let Some(out) = &self.last_output {
+                    ui.horizontal(|ui| {
+                        if ui.add(ghost_button("打开输出目录")).clicked() {
+                            open_in_explorer(out);
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("上次输出: {}", out.display()))
+                                .size(10.0)
+                                .color(TEXT_FAINT)
+                                .monospace(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                }
+
                 log_card(ui, self.busy, self.progress, &self.logs);
+            });
+    }
+
+    /// 解密预览面板：列出顶层条目供勾选，提供「落位选中」「全部落位」「取消」。
+    fn ui_dec_preview(&mut self, ui: &mut egui::Ui) {
+        let busy = self.busy;
+        // 取出 manifest 的顶层条目（不消费 preview）
+        let tops: Vec<(String, u64, bool)> = match &self.dec_preview {
+            Some(p) => engine::top_entries(&p.manifest),
+            None => return,
+        };
+        egui::Frame::default()
+            .fill(CARD)
+            .stroke(egui::Stroke::new(1.0, ACCENT))
+            .rounding(10.0)
+            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "解密预览（{} 个顶层条目）—— 勾选要落位的内容",
+                            tops.len()
+                        ))
+                        .size(11.5)
+                        .color(ACCENT_TEXT),
+                    );
+                });
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical()
+                    .id_source("dec_preview")
+                    .max_height(ui.available_height() * 0.30)
+                    .show(ui, |ui| {
+                        for (name, sz, is_dir) in &tops {
+                            let checked = self.dec_sel.contains(name);
+                            let tag = if *is_dir { "[目录]" } else { "[文件]" };
+                            let mut new_state = checked;
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .checkbox(&mut new_state, "")
+                                    .on_hover_text("勾选以落位此条目")
+                                    .changed()
+                                {
+                                    if new_state {
+                                        self.dec_sel.insert(name.clone());
+                                    } else {
+                                        self.dec_sel.remove(name);
+                                    }
+                                }
+                                ui.label(
+                                    egui::RichText::new(tag)
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(TEXT_MUTED),
+                                );
+                                ui.label(
+                                    egui::RichText::new(name)
+                                        .monospace()
+                                        .size(11.5)
+                                        .color(TEXT),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |r| {
+                                        r.label(
+                                            egui::RichText::new(if *is_dir {
+                                                "-".to_string()
+                                            } else {
+                                                paths::sz(*sz)
+                                            })
+                                            .monospace()
+                                            .size(10.0)
+                                            .color(TEXT_FAINT),
+                                        );
+                                    },
+                                );
+                            });
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let sel_count = self.dec_sel.len();
+                    let place_sel = ui.add_enabled(
+                        !busy && sel_count > 0,
+                        secondary_button(format!("落位选中（{}）", sel_count)),
+                    );
+                    if place_sel.clicked() {
+                        let sel: Vec<String> = tops
+                            .iter()
+                            .filter(|(n, _, _)| self.dec_sel.contains(n))
+                            .map(|(n, _, _)| n.clone())
+                            .collect();
+                        self.run_dec_place(Some(sel));
+                    }
+                    if ui
+                        .add_enabled(!busy, secondary_button("全部落位"))
+                        .clicked()
+                    {
+                        self.run_dec_place(None);
+                    }
+                    if ui
+                        .add_enabled(!busy, ghost_button("取消"))
+                        .clicked()
+                    {
+                        self.cancel_dec_preview();
+                    }
+                });
             });
     }
 
@@ -1515,6 +1773,18 @@ impl eframe::App for VaultApp {
         self.drain();
         self.drain_vault();
 
+        // 任务栏/标题栏状态标题：处理中时显示「处理中…」，空闲时恢复默认
+        let want_busy_title = self.busy || self.vp.busy;
+        if want_busy_title != self.title_busy {
+            self.title_busy = want_busy_title;
+            let title = if want_busy_title {
+                "VaultGuard — 处理中…".to_string()
+            } else {
+                "VaultGuard — 网盘伪装加密保险箱".to_string()
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+
         // 统一探测 VaultGuard 文件（按钮计数与列表徽标共用一份结果）
         self.vault_flags = self
             .items
@@ -1771,6 +2041,41 @@ fn load_window_icon() -> Option<egui::IconData> {
             height: SIZE as u32,
             rgba,
         })
+    }
+}
+
+/// 当前本地时间 HH:MM:SS（GetLocalTime，与系统时区一致）。
+fn now_hms() -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    unsafe {
+        let mut st: SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+    }
+}
+
+/// 在资源管理器中打开指定路径：目录直接打开，文件则打开其所在目录。
+fn open_in_explorer(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let target = if path.is_file() {
+        path.parent().unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    let verb: Vec<u16> = "open\0".encode_utf16().collect();
+    let target_w: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let _ = ShellExecuteW(
+            0,
+            verb.as_ptr(),
+            target_w.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 

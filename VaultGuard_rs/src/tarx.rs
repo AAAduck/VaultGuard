@@ -245,22 +245,58 @@ pub fn place(
     vault_base: &str,
     out: &Path,
 ) -> io::Result<(PathBuf, usize)> {
+    place_inner(tmp, vault_base, out, None)
+}
+
+/// 选择性落位：只把 selected 中列出的顶层条目从 tar 落位到 out。
+/// 落位策略与 place 一致：单顶层直落，否则归并到 还原_<原名>/ 下。
+/// 返回 (目标路径, 实际落位条目数)。
+pub fn place_filtered(
+    tmp: &Path,
+    vault_base: &str,
+    out: &Path,
+    selected: &[String],
+) -> io::Result<(PathBuf, usize)> {
+    place_inner(tmp, vault_base, out, Some(selected))
+}
+
+fn place_inner(
+    tmp: &Path,
+    vault_base: &str,
+    out: &Path,
+    filter: Option<&[String]>,
+) -> io::Result<(PathBuf, usize)> {
     let staged = tmp.join("x");
     let tp = tmp.join("payload.tar");
-    let (tops, count) = unpack(&tp, &staged)?;
+    let (tops, _total) = unpack(&tp, &staged)?;
     std::fs::create_dir_all(out)?;
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&staged)?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    // 若 tar 顶层是空目录，read_dir 后目录也已存在
-    if tops.len() == 1 {
-        let dst = uniq(&out.join(&tops[0]));
-        let src = staged.join(&tops[0]);
+
+    // 选中的顶层条目；filter=None 表示全选
+    let sel_tops: Vec<String> = match filter {
+        None => tops.clone(),
+        Some(sel) => tops
+            .iter()
+            .filter(|t| sel.contains(*t))
+            .cloned()
+            .collect(),
+    };
+    if sel_tops.is_empty() {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "没有匹配的条目可落位",
+        ));
+    }
+
+    let mut moved = 0usize;
+    // 单顶层（且未过滤或过滤后仍为 1）→ 直接落位到 out/原名
+    if sel_tops.len() == 1 {
+        let dst = uniq(&out.join(&sel_tops[0]));
+        let src = staged.join(&sel_tops[0]);
         match force_move(&src, &dst) {
             Ok(_) => {
                 let _ = std::fs::remove_dir_all(&staged);
-                return Ok((dst, count));
+                return Ok((dst, 1));
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&staged);
@@ -268,25 +304,24 @@ pub fn place(
             }
         }
     }
+
+    // 多顶层 → 归并到 还原_<原名>/ 下
     let name = format!(
         "还原_{}",
         safe_name(&crate::paths::strip_vault_ext(vault_base), 80)
     );
     let dst = uniq(&out.join(&name));
     std::fs::create_dir_all(&dst)?;
-    if entries.is_empty() {
-        // read_dir 过早（或顶层仅空目录已被创建）
-        entries = std::fs::read_dir(&staged)?.flatten().map(|e| e.path()).collect();
-    }
-    for en in entries {
-        let bn = en
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let _ = force_move(&en, &dst.join(&bn));
+    for top in &sel_tops {
+        let src = staged.join(top);
+        if !src.exists() {
+            continue;
+        }
+        let _ = force_move(&src, &dst.join(top));
+        moved += 1;
     }
     let _ = std::fs::remove_dir_all(&staged);
-    Ok((dst, count))
+    Ok((dst, moved))
 }
 
 #[allow(dead_code)]

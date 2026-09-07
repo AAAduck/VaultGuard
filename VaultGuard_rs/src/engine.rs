@@ -405,13 +405,50 @@ pub struct DecResult {
     pub hashes: Vec<(String, String)>, // (相对路径, sha256 hex)
 }
 
-/// 高层还原。pass 供 VG\x03 口令格式使用；v1/v2 传 None。
-pub fn do_dec(
+/// 还原预览：解密完成、认证通过后的临时状态，供选择性落位使用。
+/// 持有临时目录（含 payload.tar）；调用方用完必须交给 do_dec_place 落位或显式丢弃（Drop 清理）。
+pub struct DecPreview {
+    pub tmp_dir: PathBuf,
+    pub tar_path: PathBuf,
+    pub base: String,
+    pub manifest: Vec<(String, u64, bool)>,
+    pub plain_bytes: u64,
+}
+
+impl Drop for DecPreview {
+    fn drop(&mut self) {
+        // 保险：未被 do_dec_place 消费时，Drop 擦除临时明文
+        cleanup(&self.tmp_dir);
+    }
+}
+
+/// 提取顶层条目清单（从完整 manifest 中取第一层路径，去重保序）。
+pub fn top_entries(manifest: &[(String, u64, bool)]) -> Vec<(String, u64, bool)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (name, sz, is_dir) in manifest {
+        let top = name.split('/').next().unwrap_or("").to_string();
+        if top.is_empty() || !seen.insert(top.clone()) {
+            continue;
+        }
+        if name == &top {
+            // 条目本身就是顶层
+            out.push((top, *sz, *is_dir));
+        } else {
+            // 子条目，顶层是目录（tar 保证目录条目在子文件之前，但兜底处理）
+            out.push((top, 0, true));
+        }
+    }
+    out
+}
+
+/// 第一阶段：解密 + 认证 + 列清单，不落位。返回 DecPreview 供选择性落位。
+/// pass 供 VG\x03 口令格式使用；v1/v2 传 None。
+pub fn do_dec_preview(
     path: &Path,
-    out_root: &Path,
     pass: Option<&str>,
     on_progress: Option<&ProgressFn<'_>>,
-) -> Result<DecResult, String> {
+) -> Result<DecPreview, String> {
     if !path.is_file() {
         return Err("不是文件".to_string());
     }
@@ -422,7 +459,7 @@ pub fn do_dec(
     };
     let tmp = mktmpdir();
     let tp = tmp.join("payload.tar");
-    let result = (|| -> Result<DecResult, String> {
+    let result = (|| -> Result<DecPreview, String> {
         let size = stream_decrypt(shell, path, &tp, pass, on_progress).map_err(|e| e.to_string())?;
         let base = safe_name(
             &path
@@ -431,20 +468,63 @@ pub fn do_dec(
                 .unwrap_or_default(),
             110,
         );
-        let (dst, n) = tarx::place(&tmp, &base, out_root).map_err(|e| e.to_string())?;
         let manifest = tarx::list_file(&tp).unwrap_or_default();
+        Ok(DecPreview {
+            tmp_dir: tmp.clone(),
+            tar_path: tp,
+            base,
+            manifest,
+            plain_bytes: size,
+        })
+    })();
+    if result.is_err() {
+        cleanup(&tmp);
+    }
+    // 成功时 tmp 由 DecPreview 持有；失败时已 cleanup
+    result
+}
+
+/// 第二阶段：从预览落位到 out_root。
+/// filter=None 全量落位；filter=Some 只落位选中的顶层条目。
+/// 消费 preview（内部清理临时目录）。
+pub fn do_dec_place(
+    mut preview: DecPreview,
+    out_root: &Path,
+    filter: Option<&[String]>,
+) -> Result<DecResult, String> {
+    let result = (|| -> Result<DecResult, String> {
+        let (dst, n) = match filter {
+            None => tarx::place(&preview.tmp_dir, &preview.base, out_root),
+            Some(sel) => tarx::place_filtered(&preview.tmp_dir, &preview.base, out_root, sel),
+        }
+        .map_err(|e| e.to_string())?;
+        let manifest = std::mem::take(&mut preview.manifest);
         let mut hashes = Vec::new();
         collect_hashes(&dst, &mut hashes, 0);
         Ok(DecResult {
             dst,
             entries: n,
-            plain_bytes: size,
+            plain_bytes: preview.plain_bytes,
             manifest,
             hashes,
         })
     })();
-    cleanup(&tmp); // 明文临时 tar：覆写擦除后删除
+    // 无论成功失败，临时目录都已由 place/place_filtered 内部清理 staged；
+    // 但 tmp_dir 本身（含可能的残留 payload.tar）仍需擦除
+    cleanup(&preview.tmp_dir);
+    // 阻止 DecPreview::drop 重复 cleanup（tmp_dir 已删，cleanup 是幂等的 best-effort）
     result
+}
+
+/// 高层还原（全量，向后兼容）。pass 供 VG\x03 口令格式使用；v1/v2 传 None。
+pub fn do_dec(
+    path: &Path,
+    out_root: &Path,
+    pass: Option<&str>,
+    on_progress: Option<&ProgressFn<'_>>,
+) -> Result<DecResult, String> {
+    let preview = do_dec_preview(path, pass, on_progress)?;
+    do_dec_place(preview, out_root, None)
 }
 
 const HASH_LIMIT: usize = 32; // 最多记录 32 个文件的哈希，防止超大目录刷屏
