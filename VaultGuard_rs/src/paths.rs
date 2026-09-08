@@ -6,6 +6,16 @@ pub const APP: &str = "VaultGuard";
 
 pub const REG_PATH: &str = r"Software\VaultGuard";
 
+/// Windows 保留设备名（大小写不敏感，命中需让位）
+fn is_reserved_win_stem(stem: &str) -> bool {
+    const RES: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let up = stem.to_ascii_uppercase();
+    RES.contains(&up.as_str())
+}
+
 /// 清洗为合法文件名（替代 Python 的 _safe）
 pub fn safe_name(s: &str, lim: usize) -> String {
     let mut out = String::with_capacity(s.len());
@@ -22,6 +32,12 @@ pub fn safe_name(s: &str, lim: usize) -> String {
     }
     while trimmed.ends_with(' ') {
         trimmed.pop();
+    }
+    // Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含扩展名同样保留）：
+    // 创建名为 CON 的文件会打开控制台设备而非落盘，须让位
+    let stem = trimmed.split('.').next().unwrap_or("");
+    if is_reserved_win_stem(stem) {
+        trimmed = format!("_{}", trimmed);
     }
     if trimmed.is_empty() {
         trimmed = "file".to_string();
@@ -191,11 +207,25 @@ pub fn tmp_root() -> PathBuf {
 }
 
 pub const TMP_PREFIX: &str = "vg_tmp_";
-pub const TMP_MAX_AGE: u64 = 3600;
+/// 活跃标记：会话/预览持有期间定期刷新，防启动清扫误删长时间打开的临时数据
+pub const ACTIVE_MARKER: &str = ".vg_active";
+pub const TMP_MAX_AGE: u64 = 3600; // 无活跃标记的旧目录（历史遗留）
+pub const ACTIVE_MAX_AGE: u64 = 86_400; // 活跃标记过期（进程崩溃残留）上限
 
+/// 刷新活跃标记（写当前时间）。打开中的保险箱会话与解密预览定期调用。
+pub fn touch_active(dir: &Path) -> std::io::Result<()> {
+    std::fs::write(dir.join(ACTIVE_MARKER), b"1")
+}
+
+/// 启动清扫：删除过期临时目录。判定规则：
+/// 有活跃标记 → 标记 mtime 超过 ACTIVE_MAX_AGE（崩溃残留）才删；
+/// 无活跃标记 → 目录 mtime 超过 TMP_MAX_AGE（历史遗留）才删。
 pub fn sweep_old_tmp() {
-    let base = tmp_root();
-    let Ok(rd) = std::fs::read_dir(&base) else {
+    sweep_dir(&tmp_root());
+}
+
+fn sweep_dir(base: &Path) {
+    let Ok(rd) = std::fs::read_dir(base) else {
         return;
     };
     for e in rd.flatten() {
@@ -204,23 +234,40 @@ pub fn sweep_old_tmp() {
             continue;
         }
         let p = e.path();
-        if let Ok(meta) = e.metadata() {
-            if let Ok(now) = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-            {
-                let age = now.as_secs().saturating_sub(
-                    meta.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
-                );
-                if age > TMP_MAX_AGE {
-                    let _ = std::fs::remove_dir_all(&p);
-                }
-            }
+        if !p.is_dir() {
+            continue;
+        }
+        let marker = p.join(ACTIVE_MARKER);
+        let (have_marker, age) = if marker.is_file() {
+            (true, file_age(&marker).unwrap_or(0))
+        } else {
+            (false, file_age(&p).unwrap_or(0))
+        };
+        let limit = if have_marker {
+            ACTIVE_MAX_AGE
+        } else {
+            TMP_MAX_AGE
+        };
+        if age > limit {
+            let _ = std::fs::remove_dir_all(&p);
         }
     }
+}
+
+fn file_age(p: &Path) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let mt = p
+        .metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(now.saturating_sub(mt))
 }
 
 pub fn mktmpdir() -> PathBuf {
@@ -229,6 +276,7 @@ pub fn mktmpdir() -> PathBuf {
         let name = format!("{}{:08x}", TMP_PREFIX, rand::random::<u32>());
         let p = d.join(name);
         if std::fs::create_dir_all(&p).is_ok() {
+            let _ = touch_active(&p);
             return p;
         }
     }
@@ -382,5 +430,51 @@ mod tests {
             !pass_tip_due_state(now - PASS_TIP_DAY_SECS * 5, now, true),
             "已关闭不应提醒"
         );
+    }
+
+    #[test]
+    fn safe_name_reserved_devices_are_displaced() {
+        assert_eq!(safe_name("CON", 100), "_CON", "设备名必须让位");
+        assert_eq!(safe_name("com1.txt", 100), "_com1.txt", "带扩展名同样保留");
+        assert_eq!(safe_name("LPT9", 100), "_LPT9");
+        assert_eq!(safe_name("aux.log", 100), "_aux.log");
+        assert_eq!(safe_name("正常.txt", 100), "正常.txt", "普通名不受影响");
+        assert_eq!(safe_name("console.log", 100), "console.log", "仅精确设备名命中");
+    }
+
+    #[test]
+    fn sweep_skips_active_and_removes_stale() {
+        let base = std::env::temp_dir().join(format!("vg_sweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // 1) 新鲜活跃标记：无论目录多旧都不能删
+        let active = base.join("vg_tmp_active");
+        std::fs::create_dir_all(&active).unwrap();
+        touch_active(&active).unwrap();
+
+        // 2) 标记已过期（进程崩溃残留）：应删
+        let stale = base.join("vg_tmp_stale");
+        std::fs::create_dir_all(&stale).unwrap();
+        touch_active(&stale).unwrap();
+        set_mtime_old(&stale.join(ACTIVE_MARKER), 25 * 3600);
+
+        // 3) 无标记但目录未超时（历史遗留，刚创建）：不应删
+        let legacy = base.join("vg_tmp_legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        sweep_dir(&base);
+
+        assert!(active.exists(), "新鲜标记的目录不能被清扫");
+        assert!(!stale.exists(), "标记过期的目录应被清扫");
+        assert!(legacy.exists(), "无标记但未超时的目录不应被清扫");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn set_mtime_old(p: &std::path::Path, secs: u64) {
+        use std::time::{Duration, SystemTime};
+        if let Ok(t) = std::fs::File::options().write(true).open(p) {
+            let _ = t.set_modified(SystemTime::now() - Duration::from_secs(secs));
+        }
     }
 }

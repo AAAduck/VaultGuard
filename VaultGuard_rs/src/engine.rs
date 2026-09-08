@@ -299,6 +299,29 @@ pub struct EncOptions {
     pub cover: Option<PathBuf>,
 }
 
+/// 路径内容大小：文件取自身大小，目录递归统计（与 tar 打包量一致，供进度计算）。
+fn dir_size(p: &Path) -> u64 {
+    fn rec(dir: &Path) -> u64 {
+        let mut sum = 0u64;
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let q = e.path();
+                if q.is_dir() {
+                    sum += rec(&q);
+                } else {
+                    sum += e.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+        sum
+    }
+    if p.is_dir() {
+        rec(p)
+    } else {
+        p.metadata().map(|m| m.len()).unwrap_or(0)
+    }
+}
+
 /// 高层加密。返回 (输出路径, 打包项数, 明文 tar 字节数)。
 /// 加密全程无明文临时文件（tar 流直通加密管道）。
 pub fn do_enc(
@@ -329,10 +352,8 @@ pub fn do_enc(
     };
     let sb = shell_byte(shell);
     let count = valid.len();
-    let total: u64 = valid
-        .iter()
-        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-        .sum();
+    // 目录按递归内容计大小，进度才与 tar 打包量一致
+    let total: u64 = valid.iter().map(|p| dir_size(p)).sum();
     let first = valid[0]
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -419,6 +440,13 @@ impl Drop for DecPreview {
     fn drop(&mut self) {
         // 保险：未被 do_dec_place 消费时，Drop 擦除临时明文
         cleanup(&self.tmp_dir);
+    }
+}
+
+impl DecPreview {
+    /// 刷新活跃标记（GUI 定期调用，防止启动清扫误删等待落位的预览临时数据）。
+    pub fn touch(&self) -> std::io::Result<()> {
+        crate::paths::touch_active(&self.tmp_dir)
     }
 }
 

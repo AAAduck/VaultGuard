@@ -79,7 +79,8 @@ pub fn open(path: &Path, pass: &str) -> io::Result<Session> {
             read_verify(path, pass, &mut tar, &|_, _| {})?;
         }
         tarx::unpack_file(&staged_for_body.join("payload.tar"), &tree)?;
-        let _ = std::fs::remove_file(staged_for_body.join("payload.tar"));
+        // 覆写擦除再删（明文 tar 不落未覆盖扇区）
+        cleanup(&staged_for_body.join("payload.tar"));
         let mut s = Session {
             path: path.to_path_buf(),
             pass: pass.to_string(),
@@ -104,8 +105,23 @@ impl Session {
         self.entries = walk_entries(&self.tree);
     }
 
+    /// 刷新活跃标记（GUI 定期调用，防止启动清扫误删长时间打开的会话临时数据）。
+    pub fn touch(&self) -> std::io::Result<()> {
+        crate::paths::touch_active(&self.staged)
+    }
+
     /// 添加文件/文件夹（复制进箱，原文件不动）。返回成功添加的项数。
     pub fn add_paths(&mut self, srcs: &[PathBuf]) -> io::Result<usize> {
+        self.add_paths_impl(srcs, false)
+    }
+
+    /// 添加文件/文件夹，文件按扩展名归档到「图片/文档/压缩包/音频/视频/其他」子目录
+    /// （可选整理；文件夹一律放根目录，保持整目录原样）。返回成功添加的项数。
+    pub fn add_paths_organized(&mut self, srcs: &[PathBuf]) -> io::Result<usize> {
+        self.add_paths_impl(srcs, true)
+    }
+
+    fn add_paths_impl(&mut self, srcs: &[PathBuf], organize: bool) -> io::Result<usize> {
         let mut added = 0usize;
         for src in srcs {
             if !src.exists() {
@@ -116,7 +132,17 @@ impl Session {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "item".to_string());
             let base = safe_name(&raw, 100);
-            let dst = uniq(&self.tree.join(&base));
+            let mut dir = if organize && src.is_file() {
+                self.tree.join(category_of(&raw))
+            } else {
+                self.tree.clone()
+            };
+            // 分类目录与既有文件同名时让位（如箱内已有一个叫「图片」的文件）
+            if dir.exists() && !dir.is_dir() {
+                dir = uniq(&dir);
+            }
+            std::fs::create_dir_all(&dir)?;
+            let dst = uniq(&dir.join(&base));
             copy_recursive(src, &dst)?;
             added += 1;
         }
@@ -314,7 +340,7 @@ impl Session {
         result
     }
 
-    /// 选择性导出指定条目到 out_root（复制，不影响箱内）。
+    /// 选择性导出指定条目到 out_root（复制，不影响箱内；嵌套路径保留目录层级）。
     pub fn export_selective(&self, names: &[String], out_root: &Path) -> io::Result<usize> {
         std::fs::create_dir_all(out_root)?;
         let mut n = 0usize;
@@ -323,11 +349,14 @@ impl Session {
             if !src.exists() {
                 continue;
             }
-            let dst = uniq(&out_root.join(safe_name(name, 100)));
+            let dst = uniq(&out_root.join(rel_safe(name)));
             if src.is_dir() {
                 std::fs::create_dir_all(&dst)?;
                 copy_recursive(&src, &dst)?;
             } else {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 std::fs::copy(&src, &dst)?;
             }
             n += 1;
@@ -543,6 +572,45 @@ fn split_ext(name: &str) -> (String, String) {
     match name.rfind('.') {
         Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
         _ => (name.to_string(), String::new()),
+    }
+}
+
+/// 箱内相对路径逐段清洗为安全路径（保留目录层级，段级让位非法字符）。
+fn rel_safe(name: &str) -> PathBuf {
+    let mut p = PathBuf::new();
+    for seg in name.split('/') {
+        if !seg.is_empty() {
+            p.push(safe_name(seg, 100));
+        }
+    }
+    if p.as_os_str().is_empty() {
+        p.push("file");
+    }
+    p
+}
+
+/// 文件扩展名 -> 分类目录名（大小写不敏感，多重扩展名取最后一段）。
+/// 无扩展名归入「其他」；目录不参与分类（调用方放根目录）。
+pub fn category_of(name: &str) -> &'static str {
+    let low = name.to_lowercase();
+    let ext = low.rsplit('.').next().unwrap_or("");
+    // 无 '.' 时 rsplit 返回整个串，视为无扩展名
+    if ext.len() == low.len() {
+        return "其他";
+    }
+    match ext {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "tif" | "tiff" | "ico"
+        | "heic" | "heif" => "图片",
+        "doc" | "docx" | "pdf" | "txt" | "md" | "xls" | "xlsx" | "ppt" | "pptx" | "odt"
+        | "ods" | "odp" | "csv" | "rtf" | "epub" | "tex" => "文档",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "tgz" | "zst" | "cab" | "iso" => {
+            "压缩包"
+        }
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" | "mid" | "midi" => {
+            "音频"
+        }
+        "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "ts" | "m2ts" => "视频",
+        _ => "其他",
     }
 }
 

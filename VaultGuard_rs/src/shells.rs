@@ -459,19 +459,33 @@ where
             ))
         }
     };
+    // 记录长度受零件剩余字节约束 + 硬上限：恶意声明的超长记录直接拒绝，避免先分配后读取导致 OOM
+    const MAX_REC: u64 = 64 << 20;
+    let mut remaining = src.size();
     loop {
-        let mut hdr = [0u8; 5];
-        let n = src.read(&mut hdr)?;
-        if n == 0 {
+        if remaining == 0 {
             break;
         }
-        if n != 5 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "加密数据零件损坏"));
+        if remaining < 5 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "加密数据零件损坏",
+            ));
         }
+        let mut hdr = [0u8; 5];
+        src.read_exact(&mut hdr)?;
+        remaining -= 5;
         let sub = hdr[0];
-        let ln = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
-        let mut pl = vec![0u8; ln];
+        let ln = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as u64;
+        if ln > remaining || ln > MAX_REC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "加密数据零件损坏",
+            ));
+        }
+        let mut pl = vec![0u8; ln as usize];
         src.read_exact(&mut pl)?;
+        remaining -= ln;
         let ev = match sub {
             SUB_HEAD => Ev::H(pl),
             SUB_DATA => Ev::D(pl),
@@ -631,4 +645,68 @@ pub fn validate_cover(shell: &str, path: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// 构造一个声明超长数据记录的恶意 docx 壳，解析必须被拒绝（防 OOM 崩溃）。
+    #[test]
+    fn docx_oversized_record_rejected() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zw = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file(DOCX_PART, opts).unwrap();
+            // 合法 HEAD 记录（VG\03），随后声明 4GB 长度的数据记录
+            zw.write_all(&[SUB_HEAD, 0, 0, 0, 3, FMT_V3[0], FMT_V3[1], FMT_V3[2]])
+                .unwrap();
+            zw.write_all(&[SUB_DATA, 0xFF, 0xFF, 0xFF, 0xFF]).unwrap();
+            zw.finish().unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("vg_docx_cap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("evil.docx");
+        std::fs::write(&p, buf.into_inner()).unwrap();
+
+        let r = evs_docx(&p, |_| Ok(()));
+        assert!(r.is_err(), "超长记录应被拒绝，实际: {r:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 正常记录流仍可解析（防误伤合法容器）。
+    #[test]
+    fn docx_normal_records_parse() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zw = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file(DOCX_PART, opts).unwrap();
+            zw.write_all(&[SUB_HEAD, 0, 0, 0, 3, FMT_V3[0], FMT_V3[1], FMT_V3[2]])
+                .unwrap();
+            zw.write_all(&[SUB_DATA, 0, 0, 0, 2, 0xAA, 0xBB]).unwrap();
+            zw.write_all(&[SUB_TAG, 0, 0, 0, 1, 0xCC]).unwrap();
+            zw.finish().unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("vg_docx_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("ok.docx");
+        std::fs::write(&p, buf.into_inner()).unwrap();
+
+        let mut got: Vec<Ev> = Vec::new();
+        evs_docx(&p, |ev| {
+            got.push(ev);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got.len(), 3, "HEAD/DATA/TAG 三条记录都应解析出");
+        assert!(matches!(&got[0], Ev::H(h) if h == FMT_V3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

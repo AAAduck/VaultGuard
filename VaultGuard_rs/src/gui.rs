@@ -64,7 +64,7 @@ enum Page {
 enum VaultTask {
     Create(String, String),
     Open(String, String),
-    Add(Vec<PathBuf>),
+    Add(Vec<PathBuf>, bool), // (路径列表, 是否按类型归档)
     Remove(Vec<String>),
     Rename(String, String),
     MoveEntry(String, String),
@@ -101,6 +101,8 @@ struct VaultApp {
     title_busy: bool,
     // 口令到期提醒（90 天）
     pass_tip_due: bool,
+    // 活跃标记心跳节流（保险箱会话/解密预览存在时每 30s 刷新一次）
+    hb_last: std::time::Instant,
 }
 
 struct VaultPage {
@@ -115,6 +117,7 @@ struct VaultPage {
     busy: bool,
     session: Option<safe::Session>,
     sel: HashSet<String>,
+    organize: bool, // 添加时按类型归档到子目录
     tx: Sender<VMsg>,
     rx: Receiver<VMsg>,
 }
@@ -134,6 +137,7 @@ impl VaultPage {
             busy: false,
             session: None,
             sel: HashSet::new(),
+            organize: false,
             tx,
             rx,
         }
@@ -174,6 +178,7 @@ impl VaultApp {
             dec_origin: None,
             title_busy: false,
             pass_tip_due: paths::pass_tip_due(),
+            hb_last: std::time::Instant::now(),
         }
     }
 
@@ -893,7 +898,22 @@ impl VaultApp {
                         )
                         .clicked()
                     {
-                        if let Some(out) = &self.last_output {
+                        let out = self.last_output.clone();
+                        if let Some(out) = out {
+                            // 口令会随文案进剪贴板（Win+V 剪贴板历史会留存），复制前确认
+                            if !self.passphrase.is_empty() {
+                                let ok = rfd::MessageDialog::new()
+                                    .set_title("分享说明")
+                                    .set_description(
+                                        "分享文案将包含口令并复制到剪贴板。\n注意：Windows 剪贴板历史（Win+V）会留存口令，用后建议清空剪贴板。\n\n是否继续？",
+                                    )
+                                    .set_buttons(rfd::MessageButtons::OkCancel)
+                                    .show();
+                                if ok != rfd::MessageDialogResult::Ok {
+                                    self.log("已取消复制分享说明。");
+                                    return;
+                                }
+                            }
                             let pass_note = if self.passphrase.is_empty() {
                                 "（未设口令：内置密钥模式）".to_string()
                             } else {
@@ -1288,7 +1308,7 @@ impl VaultApp {
                         .clicked()
                     {
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let task = VaultTask::Add(files);
+                            let task = VaultTask::Add(files, self.vp.organize);
                             let sess = self.vp.session.take();
                             self.vp.busy = true;
                             let tx = self.vp.tx.clone();
@@ -1300,7 +1320,7 @@ impl VaultApp {
                         .clicked()
                     {
                         if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                            let task = VaultTask::Add(vec![d]);
+                            let task = VaultTask::Add(vec![d], self.vp.organize);
                             let sess = self.vp.session.take();
                             self.vp.busy = true;
                             let tx = self.vp.tx.clone();
@@ -1387,7 +1407,13 @@ impl VaultApp {
                         self.log("保险箱已关闭，临时数据已擦除。");
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
+                // 添加时按类型归档（可选）：文件按扩展名进 图片/文档/压缩包/音频/视频/其他，文件夹放根目录
+                ui.checkbox(
+                    &mut self.vp.organize,
+                    "添加时按类型归档到子目录（文件按扩展名分类，文件夹放根目录）",
+                );
+                ui.add_space(4.0);
 
                 if self.vp.changing {
                     ui.horizontal(|ui| {
@@ -1882,16 +1908,26 @@ fn vault_worker(
             }
             Err(e) => Err(e.to_string()),
         },
-        VaultTask::Add(files) => match sess.as_mut() {
+        VaultTask::Add(files, organize) => match sess.as_mut() {
             Some(s) => {
                 let n = files.len();
-                s.add_paths(&files)
-                    .and_then(|added| {
-                        line(format!("已添加 {} 项，正在重新加密保存…", added));
-                        s.save(&save_prog)
-                    })
-                    .map(|_| format!("已添加 {} 项并保存", n))
-                    .map_err(|e| e.to_string())
+                let add = if organize {
+                    s.add_paths_organized(&files)
+                } else {
+                    s.add_paths(&files)
+                };
+                add.and_then(|added| {
+                    line(format!("已添加 {} 项，正在重新加密保存…", added));
+                    s.save(&save_prog)
+                })
+                .map(|_| {
+                    if organize {
+                        format!("已添加 {} 项并按类型归档保存", n)
+                    } else {
+                        format!("已添加 {} 项并保存", n)
+                    }
+                })
+                .map_err(|e| e.to_string())
             }
             None => Err("保险箱未打开".into()),
         },
@@ -1974,6 +2010,17 @@ impl eframe::App for VaultApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
         self.drain_vault();
+
+        // 活跃标记心跳：会话/预览存在时每 30s 刷新，防启动清扫误删长时间打开的临时数据
+        if self.hb_last.elapsed().as_secs() >= 30 {
+            self.hb_last = std::time::Instant::now();
+            if let Some(s) = &self.vp.session {
+                let _ = s.touch();
+            }
+            if let Some(p) = &self.dec_preview {
+                let _ = p.touch();
+            }
+        }
 
         // 任务栏/标题栏状态标题：处理中时显示「处理中…」，空闲时恢复默认
         let want_busy_title = self.busy || self.vp.busy;
@@ -2281,5 +2328,7 @@ fn open_in_explorer(path: &Path) {
     }
 }
 
-/// --ui-smoke 自检：验证 GUI 模块可加载（供自动化冒烟）
-pub fn smoke() {}
+/// --ui-smoke 自检：验证 GUI 状态可构造（读注册表/提醒文件，供自动化冒烟）。
+pub fn smoke() {
+    let _app = VaultApp::new();
+}
