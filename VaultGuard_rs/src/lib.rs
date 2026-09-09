@@ -4,6 +4,7 @@
 pub mod crypto;
 pub mod engine;
 pub mod paths;
+pub mod profile;
 pub mod safe;
 pub mod shells;
 pub mod tarx;

@@ -59,7 +59,8 @@ fn embed_resources() -> Result<(), String> {
         return Err(format!("zig not found at {} (set ZIG_BIN to override)", zig.display()));
     }
 
-    // .res 文件名带指纹（图标+清单）：内容变化 -> 文件名变化 -> 链接参数变化 -> cargo 必然重链接
+    // .res 文件名带指纹（图标+清单+版本）：任一项变化 -> 文件名变化 -> 链接参数变化
+    // -> cargo 必然重链接。版本号必须进指纹：否则本地升版会用缓存的旧 .res（旧 VERSIONINFO）。
     let mut stamp = String::new();
     for f in [&manifest, &ico] {
         let part = fs::metadata(f)
@@ -73,6 +74,8 @@ fn embed_resources() -> Result<(), String> {
             .unwrap_or_else(|| "0".into());
         stamp.push_str(&part);
     }
+    let (vmaj, vmin, vpat) = version_triple();
+    stamp.push_str(&format!("{vmaj}.{vmin}.{vpat}"));
     let res_path = out_dir.join(format!("vg_{stamp}.res"));
     let rc_path = out_dir.join(format!("vg_{stamp}.rc"));
 

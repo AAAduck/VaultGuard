@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::{ct_eq, derive_v3, ArgonParams, Gcm, NONCE_SZ, TAG_SZ};
 use crate::paths::{cleanup, mktmpdir, safe_name, uniq};
+use crate::profile;
 use crate::{tarx, vgs2};
 
 /// 历史 VGS1 格式常量，保留给还原路径和兼容性测试。
@@ -33,8 +34,9 @@ pub struct Entry {
 enum Source {
     /// 已落盘的 VGS2 数据段，tar_path 是段内的原始归档路径。
     Existing { seg: u64, tar_path: String },
-    /// 这次会话新增的安全临时副本；保存时才写成数据段。
-    Staged(PathBuf),
+    /// 本次会话暂存的批量 tar（add 时把整批新增打包成一个文件）；
+    /// arc 是该条目在暂存 tar 内的路径。保存时整段加密，避免逐文件小读写。
+    StagedTar { tar: PathBuf, arc: String },
     /// VGS1 打开时的临时工作树。第一次保存会全量升级到 VGS2。
     Legacy(PathBuf),
     /// 目录不占数据段；manifest 本身保留其存在与层级。
@@ -65,6 +67,8 @@ pub struct Session {
     pub path: PathBuf,
     pass: String,
     staged: PathBuf,
+    /// VGS1 会话保留解密出的明文 tar（升级保存时整段转发，避免逐文件重打包）。
+    legacy_tar: Option<PathBuf>,
     nodes: BTreeMap<String, Node>,
     pub entries: Vec<Entry>,
     storage: Storage,
@@ -92,6 +96,7 @@ pub fn create(path: &Path, pass: &str) -> io::Result<Session> {
         path: path.to_path_buf(),
         pass: pass.to_string(),
         staged,
+        legacy_tar: None,
         nodes: BTreeMap::new(),
         entries: Vec::new(),
         storage: Storage::New,
@@ -126,54 +131,58 @@ fn open_v2(path: &Path, pass: &str) -> io::Result<Session> {
     let mut hdr = [0u8; vgs2::HDR_SZ];
     f.read_exact(&mut hdr)?;
     let (_, m, t, p, salt, _) = vgs2::decode_header(&hdr)?;
-    let key = derive_v3(pass.as_bytes(), &salt, ArgonParams { m_kib: m, t, p })?;
-    let all_segments = vgs2::scan_segments(&mut f)?;
+    let key = profile::phase("kdf", || derive_v3(pass.as_bytes(), &salt, ArgonParams { m_kib: m, t, p }))?;
+    let all_segments = profile::phase("scan", || vgs2::scan_segments(&mut f))?;
 
     // manifest 可能已完整写头、但未写完 tag 或被损坏。由后向前尝试已结构化的
     // manifest，认证失败时回退到上一份；错误口令则所有 manifest 都会失败。
     let mut last_err: Option<io::Error> = None;
-    for i in (0..all_segments.len()).rev() {
-        let seg = all_segments[i];
-        if seg.head.seg_type != vgs2::SEG_MANIFEST {
-            continue;
-        }
-        match vgs2::read_manifest_segment(&mut f, seg, &key)
-            .and_then(|b| vgs2::decode_manifest(&b))
-            .and_then(|m| nodes_from_manifest(m, &all_segments[..=i]))
-        {
-            Ok(nodes) => {
-                let staged = mktmpdir();
-                std::fs::create_dir_all(staged.join("adds"))?;
-                let mut s = Session {
-                    path: path.to_path_buf(),
-                    pass: pass.to_string(),
-                    staged,
-                    nodes,
-                    entries: Vec::new(),
-                    storage: Storage::V2 {
-                        key,
-                        segments: all_segments[..=i].to_vec(),
-                        manifest_count: all_segments[..=i]
-                            .iter()
-                            .filter(|x| x.head.seg_type == vgs2::SEG_MANIFEST)
-                            .count(),
-                    },
-                    dirty: false,
-                    next_stage: 1,
-                };
-                s.refresh_entries();
-                return Ok(s);
+    let opened = profile::phase("manifest-open", || {
+        for i in (0..all_segments.len()).rev() {
+            let seg = all_segments[i];
+            if seg.head.seg_type != vgs2::SEG_MANIFEST {
+                continue;
             }
-            Err(e) => last_err = Some(e),
+            match vgs2::read_manifest_segment(&mut f, seg, &key)
+                .and_then(|b| vgs2::decode_manifest(&b))
+                .and_then(|m| nodes_from_manifest(m, &all_segments[..=i]))
+            {
+                Ok(nodes) => return Ok::<_, io::Error>((nodes, i)),
+                Err(e) => last_err = Some(e),
+            }
         }
-    }
-    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "未找到有效 manifest")))
+        Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "未找到有效 manifest")))
+    });
+    let (nodes, manifest_i) = opened?;
+    let staged = mktmpdir();
+    std::fs::create_dir_all(staged.join("adds"))?;
+    let mut s = Session {
+        path: path.to_path_buf(),
+        pass: pass.to_string(),
+        staged,
+        legacy_tar: None,
+        nodes,
+        entries: Vec::new(),
+        storage: Storage::V2 {
+            key,
+            segments: all_segments[..=manifest_i].to_vec(),
+            manifest_count: all_segments[..=manifest_i]
+                .iter()
+                .filter(|x| x.head.seg_type == vgs2::SEG_MANIFEST)
+                .count(),
+        },
+        dirty: false,
+        next_stage: 1,
+    };
+    s.refresh_entries();
+    Ok(s)
 }
 
 /// VGS1 兼容打开。旧格式没有独立索引，必须解密一次；保存时自动升级到 VGS2。
 fn open_v1(path: &Path, pass: &str) -> io::Result<Session> {
     let staged = mktmpdir();
     let staged_for_session = staged.clone();
+    std::fs::create_dir_all(staged_for_session.join("adds"))?;
     let result = (|| -> io::Result<Session> {
         let tar = staged_for_session.join("legacy_payload.tar");
         {
@@ -182,12 +191,13 @@ fn open_v1(path: &Path, pass: &str) -> io::Result<Session> {
         }
         let tree = staged_for_session.join("legacy_tree");
         tarx::unpack_file(&tar, &tree)?;
-        cleanup(&tar);
+        // 保留明文 tar：升级保存时整段转发为数据段，避免对工作树逐文件重打包
         let nodes = collect_legacy_nodes(&tree)?;
         let mut s = Session {
             path: path.to_path_buf(),
             pass: pass.to_string(),
             staged: staged_for_session,
+            legacy_tar: Some(tar),
             nodes,
             entries: Vec::new(),
             storage: Storage::LegacyV1,
@@ -236,6 +246,12 @@ impl Session {
 
     fn add_paths_impl(&mut self, srcs: &[PathBuf], organize: bool) -> io::Result<usize> {
         let mut added = 0usize;
+        let mut pack_items: Vec<(PathBuf, String)> = Vec::new();
+        let mut entry_infos: Vec<(String, bool, u64, i64, String)> = Vec::new(); // (name, is_dir, size, mtime, arc)
+        // 本批次已占用的名字（节点要打包后才插入，重名去重需要提前记账；
+        // 除顶层名外还含目录源的子条目名，防止「文件夹 A 的 x.txt」与
+        // 单独拖入的 A/x.txt 在本批次内撞名）。
+        let mut pending: BTreeSet<String> = BTreeSet::new();
         for src in srcs {
             if !src.exists() {
                 continue;
@@ -259,16 +275,34 @@ impl Session {
                 self.ensure_dirs(&parent)?;
             }
             let wanted = if parent.is_empty() { base } else { format!("{parent}/{base}") };
-            let target = self.unique_path(&wanted);
+            let target = self.unique_path_pending(&wanted, &pending);
+            pending.insert(target.clone());
             self.ensure_parent_dirs(&target)?;
-
-            let physical = self.staged.join("adds").join(format!("{:016x}", self.next_stage));
-            self.next_stage = self.next_stage.wrapping_add(1).max(1);
-            copy_recursive(src, &physical)?;
-            collect_staged_nodes(&physical, &target, &mut self.nodes)?;
+            pack_items.push((src.clone(), target.clone()));
+            let start = entry_infos.len();
+            collect_src_entries(src, &target, &mut entry_infos)?;
+            for (name, ..) in &entry_infos[start..] {
+                pending.insert(name.clone());
+            }
             added += 1;
         }
         if added > 0 {
+            // 整批新增合并成一个暂存 tar：保存时作为单个数据段加密，
+            // 避免逐文件小读写（1 万文件档实测可差一个数量级）。
+            let tar_path = self.staged.join("adds").join(format!("{:016x}.tar", self.next_stage));
+            self.next_stage = self.next_stage.wrapping_add(1).max(1);
+            profile::phase("stage-pack", || {
+                let mut f = File::create(&tar_path)?;
+                tarx::pack_recursive_entries(&pack_items, &mut f)
+            })?;
+            for (name, is_dir, size, mtime, arc) in entry_infos {
+                let source = if is_dir {
+                    Source::Dir
+                } else {
+                    Source::StagedTar { tar: tar_path.clone(), arc }
+                };
+                self.nodes.insert(name, Node { size, is_dir, mtime, source });
+            }
             self.dirty = true;
             self.refresh_entries();
         }
@@ -442,43 +476,55 @@ impl Session {
         let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let end = logical_end(&prior)?;
         // 上次崩溃的半段不属于已提交版本，可安全截掉；旧 manifest 仍在 end 之前。
-        f.set_len(end)?;
+        profile::phase("truncate", || f.set_len(end))?;
         let mut segments = prior;
         let mut next = segments.last().map(|s| s.head.seq + 1).unwrap_or(1);
-        let staged_items: Vec<(PathBuf, String, bool)> = self
-            .nodes
-            .iter()
-            .filter_map(|(name, node)| match &node.source {
-                Source::Staged(path) => Some((path.clone(), name.clone(), node.is_dir)),
-                _ => None,
-            })
-            .collect();
+        // 暂存条目按「暂存 tar」分组：(tar, [(arc, arc)]) —— 保存时整段转发。
+        let mut staged_tars: BTreeMap<PathBuf, Vec<(String, String)>> = BTreeMap::new();
+        for node in self.nodes.values() {
+            if let Source::StagedTar { tar, arc } = &node.source {
+                staged_tars.entry(tar.clone()).or_default().push((arc.clone(), arc.clone()));
+            }
+        }
         // 先在副本上准备本次提交后的索引。只有新 manifest 已完整写入并同步后，
         // 才将它换入会话；这样数据段成功、manifest 失败时，下次保存仍会从暂存
         // 文件重新追加数据，而不会引用稍后被截掉的半次提交。
         let mut committed_nodes = self.nodes.clone();
-        if !staged_items.is_empty() {
-            let total: u64 = staged_items.iter().map(|(p, _, d)| if *d { 0 } else { std::fs::metadata(p).map(|m| m.len()).unwrap_or(0) }).sum();
+        if !staged_tars.is_empty() {
+            let total: u64 = self
+                .nodes
+                .values()
+                .filter(|n| matches!(n.source, Source::StagedTar { .. }))
+                .map(|n| n.size)
+                .sum();
             let nonce = random_bytes::<NONCE_SZ>();
             let mut done = 0u64;
             let mut last = 0u8;
-            let data = vgs2::append_stream_segment(
-                &mut f,
-                vgs2::SEG_DATA,
-                next,
-                &key,
-                nonce,
-                |w| {
-                    let mut pw = ProgressWriter { inner: w, done: &mut done, total, last: &mut last, prog };
-                    tarx::pack_entries_to_writer(&staged_items, &mut pw)
-                },
-            )?;
-            for (name, node) in &mut committed_nodes {
-                if matches!(node.source, Source::Staged(_)) {
+            let data = profile::phase("data-write", || {
+                vgs2::append_stream_segment(
+                    &mut f,
+                    vgs2::SEG_DATA,
+                    next,
+                    &key,
+                    nonce,
+                    |w| {
+                        let mut pw = ProgressWriter { inner: w, done: &mut done, total, last: &mut last, prog };
+                        for (tar, wanted) in &staged_tars {
+                            let n = profile::phase("staged-relay", || tarx::relay_files(tar, wanted, &mut pw))?;
+                            if n != wanted.len() {
+                                return Err(io::Error::new(io::ErrorKind::InvalidData, "暂存 tar 缺少所列条目"));
+                            }
+                        }
+                        Ok(())
+                    },
+                )
+            })?;
+            for node in committed_nodes.values_mut() {
+                if let Source::StagedTar { arc, .. } = &node.source {
                     node.source = if node.is_dir {
                         Source::Dir
                     } else {
-                        Source::Existing { seg: next, tar_path: name.clone() }
+                        Source::Existing { seg: next, tar_path: arc.clone() }
                     };
                 }
             }
@@ -489,16 +535,18 @@ impl Session {
         if manifest.len() as u64 > vgs2::MAX_MANIFEST_LEN {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "manifest 超出打开安全上限"));
         }
-        let manifest_seg = vgs2::append_stream_segment(
-            &mut f,
-            vgs2::SEG_MANIFEST,
-            next,
-            &key,
-            random_bytes::<NONCE_SZ>(),
-            |w| w.write_all(&manifest),
-        )?;
+        let manifest_seg = profile::phase("manifest-write", || {
+            vgs2::append_stream_segment(
+                &mut f,
+                vgs2::SEG_MANIFEST,
+                next,
+                &key,
+                random_bytes::<NONCE_SZ>(),
+                |w| w.write_all(&manifest),
+            )
+        })?;
         segments.push(manifest_seg);
-        f.sync_all()?;
+        profile::phase("fsync", || f.sync_all())?;
         self.nodes = committed_nodes;
         self.storage = Storage::V2 { key, segments, manifest_count: count + 1 };
         self.dirty = false;
@@ -516,37 +564,103 @@ impl Session {
         cleanup(&tmp);
         let work = mktmpdir();
         let result = (|| -> io::Result<([u8; 32], Vec<vgs2::SegmentMeta>, BTreeMap<String, Node>)> {
-            let tree = work.join("tree");
-            self.materialize(&self.nodes.keys().cloned().collect(), &tree, &|_, _| {})?;
+            // 分组：已落盘条目按数据段归类（转发）；暂存条目按暂存 tar 归类（转发）；
+            // 旧格式条目由保留的明文 tar 整段转发。不再物化整棵明文树 ——
+            // 压缩/升级只读存活条目，省去树写、树读与树擦除。
+            let mut seg_groups: BTreeMap<u64, Vec<(String, String)>> = BTreeMap::new();
+            let mut staged_tars: BTreeMap<PathBuf, Vec<(String, String)>> = BTreeMap::new();
+            // 旧格式条目：(明文 tar 内原路径 → 转发后路径 = 当前可见名)。
+            // 升级前可能已重命名/移动，源路径取节点工作树相对路径。
+            let mut legacy_wanted: Vec<(String, String)> = Vec::new();
+            let legacy_root = self.staged.join("legacy_tree");
+            for (name, node) in &self.nodes {
+                match &node.source {
+                    Source::Existing { seg, tar_path } => {
+                        // 段内条目路径与可见名相互独立：转发时保持 tar_path 不变
+                        seg_groups.entry(*seg).or_default().push((tar_path.clone(), tar_path.clone()));
+                    }
+                    Source::StagedTar { tar, arc } => {
+                        staged_tars.entry(tar.clone()).or_default().push((arc.clone(), arc.clone()));
+                    }
+                    Source::Legacy(p) => {
+                        let rel = p.strip_prefix(&legacy_root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+                        legacy_wanted.push((rel, name.clone()));
+                    }
+                    Source::Dir => {}
+                }
+            }
+            let legacy_tar = self.legacy_tar.clone();
+            let old_key = self.v2_key();
+            let seg_map = self.segment_map();
+            let container = self.path.clone();
             let salt = random_bytes::<16>();
             let reserve_nonce = random_bytes::<NONCE_SZ>();
             let prm = ArgonParams::default();
-            let key = derive_v3(self.pass.as_bytes(), &salt, prm)?;
+            let key = profile::phase("kdf", || derive_v3(self.pass.as_bytes(), &salt, prm))?;
             let mut f = File::create(&tmp)?;
             f.write_all(&vgs2::encode_header(vgs2::KID_ARGON2ID, prm.m_kib, prm.t, prm.p, &salt, &reserve_nonce)?)?;
-            let all_items = disk_items(&tree)?;
-            let file_items: Vec<(PathBuf, String, bool)> = all_items.into_iter().filter(|x| !x.2).collect();
+            let file_count: usize = seg_groups.values().map(|v| v.len()).sum::<usize>()
+                + staged_tars.values().map(|v| v.len()).sum::<usize>()
+                + legacy_wanted.len();
             let mut segs = Vec::new();
             let mut new_nodes = self.nodes.clone();
             let mut next = 1u64;
-            if !file_items.is_empty() {
+            if file_count > 0 {
                 let mut done = 0u64;
                 let mut last = 0u8;
-                let total = file_items.iter().map(|(p, _, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum();
-                let data = vgs2::append_stream_segment(
-                    &mut f,
-                    vgs2::SEG_DATA,
-                    next,
-                    &key,
-                    random_bytes::<NONCE_SZ>(),
-                    |w| {
-                        let mut pw = ProgressWriter { inner: w, done: &mut done, total, last: &mut last, prog };
-                        tarx::pack_entries_to_writer(&file_items, &mut pw)
-                    },
-                )?;
+                let total: u64 = self.nodes.values().filter(|n| !n.is_dir).map(|n| n.size).sum();
+                let data = profile::phase("data-write", || {
+                    vgs2::append_stream_segment(
+                        &mut f,
+                        vgs2::SEG_DATA,
+                        next,
+                        &key,
+                        random_bytes::<NONCE_SZ>(),
+                        |w| {
+                            let mut pw = ProgressWriter { inner: w, done: &mut done, total, last: &mut last, prog };
+                            // 1) 转发各存活数据段的存活条目
+                            for (seq, wanted) in &seg_groups {
+                                let seg = seg_map.get(seq).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段"))?;
+                                let old_key = old_key.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式数据段状态无效"))?;
+                                let payload = work.join(format!("relay-{seq}.tar"));
+                                let one = (|| -> io::Result<()> {
+                                    {
+                                        let mut out = File::create(&payload)?;
+                                        profile::phase("seg-decrypt", || vgs2::decrypt_segment_to_file(&mut File::open(&container)?, *seg, &old_key, &mut out))?;
+                                    }
+                                    profile::phase("relay", || tarx::relay_files(&payload, wanted, &mut pw))?;
+                                    cleanup(&payload);
+                                    Ok(())
+                                })();
+                                one?;
+                            }
+                            // 2) 暂存 tar 整段转发
+                            for (tar, wanted) in &staged_tars {
+                                let n = profile::phase("staged-relay", || tarx::relay_files(tar, wanted, &mut pw))?;
+                                if n != wanted.len() {
+                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "暂存 tar 缺少所列条目"));
+                                }
+                            }
+                            // 3) 旧格式明文 tar 整段转发（源路径 → 当前可见名）
+                            if !legacy_wanted.is_empty() {
+                                let lt = legacy_tar.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式会话缺少明文 tar"))?;
+                                let n = profile::phase("legacy-relay", || tarx::relay_files(&lt, &legacy_wanted, &mut pw))?;
+                                if n != legacy_wanted.len() {
+                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "旧格式 tar 缺少所列条目"));
+                                }
+                            }
+                            Ok(())
+                        },
+                    )
+                })?;
                 for (name, node) in &mut new_nodes {
                     if !node.is_dir {
-                        node.source = Source::Existing { seg: next, tar_path: name.clone() };
+                        node.source = match &node.source {
+                            Source::Existing { tar_path, .. } => Source::Existing { seg: next, tar_path: tar_path.clone() },
+                            Source::StagedTar { arc, .. } => Source::Existing { seg: next, tar_path: arc.clone() },
+                            Source::Legacy(_) => Source::Existing { seg: next, tar_path: name.clone() },
+                            Source::Dir => unreachable!(),
+                        };
                     }
                 }
                 segs.push(data);
@@ -558,20 +672,22 @@ impl Session {
                 }
             }
             let manifest = make_manifest_for(&new_nodes)?;
-            let ms = vgs2::append_stream_segment(
-                &mut f,
-                vgs2::SEG_MANIFEST,
-                next,
-                &key,
-                random_bytes::<NONCE_SZ>(),
-                |w| w.write_all(&manifest),
-            )?;
+            let ms = profile::phase("manifest-write", || {
+                vgs2::append_stream_segment(
+                    &mut f,
+                    vgs2::SEG_MANIFEST,
+                    next,
+                    &key,
+                    random_bytes::<NONCE_SZ>(),
+                    |w| w.write_all(&manifest),
+                )
+            })?;
             segs.push(ms);
-            f.sync_all()?;
-            verify_v2_container(&tmp, &key)?;
+            profile::phase("fsync", || f.sync_all())?;
+            profile::phase("verify", || verify_v2_container(&tmp, &key))?;
             Ok((key, segs, new_nodes))
         })();
-        cleanup(&work);
+        profile::phase("cleanup", || cleanup(&work));
         let (key, segments, nodes) = match result {
             Ok(x) => x,
             Err(e) => {
@@ -579,7 +695,7 @@ impl Session {
                 return Err(e);
             }
         };
-        replace_container(&tmp, &self.path)?;
+        profile::phase("replace", || replace_container(&tmp, &self.path))?;
         self.nodes = nodes;
         self.storage = Storage::V2 { key, segments, manifest_count: 1 };
         self.dirty = false;
@@ -598,6 +714,7 @@ impl Session {
     ) -> io::Result<()> {
         std::fs::create_dir_all(tree)?;
         let mut groups: BTreeMap<u64, Vec<(String, PathBuf)>> = BTreeMap::new();
+        let mut tar_groups: BTreeMap<PathBuf, Vec<(String, PathBuf)>> = BTreeMap::new();
         let mut total = 0u64;
         for name in selected {
             let Some(node) = self.nodes.get(name) else { continue };
@@ -609,13 +726,20 @@ impl Session {
             total = total.saturating_add(node.size);
             match &node.source {
                 Source::Existing { seg, tar_path } => groups.entry(*seg).or_default().push((tar_path.clone(), dst)),
-                Source::Staged(src) | Source::Legacy(src) => {
+                Source::StagedTar { tar, arc } => tar_groups.entry(tar.clone()).or_default().push((arc.clone(), dst)),
+                Source::Legacy(src) => {
                     if let Some(parent) = dst.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    std::fs::copy(src, &dst)?;
+                    copy_file_buffered(src, &dst)?;
                 }
                 Source::Dir => return Err(io::Error::new(io::ErrorKind::InvalidData, "文件缺少数据来源")),
+            }
+        }
+        for (tar, wanted) in tar_groups {
+            let n = tarx::extract_files(&tar, &wanted)?;
+            if n != wanted.len() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "暂存 tar 缺少所列条目"));
             }
         }
         let seg_map = self.segment_map();
@@ -626,18 +750,20 @@ impl Session {
             let seg = seg_map.get(&seq).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段"))?;
             let key = self.v2_key().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式数据段状态无效"))?;
             let payload = tmp.join(format!("{seq}.tar"));
-            let one = (|| -> io::Result<()> {
-                let mut out = File::create(&payload)?;
-                let bytes = vgs2::decrypt_segment_to_file(&mut File::open(&self.path)?, *seg, &key, &mut out)?;
-                drop(out);
-                let n = tarx::extract_files(&payload, &wanted)?;
-                if n != wanted.len() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "数据段缺少 manifest 所列条目"));
-                }
-                done = done.saturating_add(bytes.min(wanted.iter().map(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum()));
-                prog(done.min(total), total);
-                Ok(())
-            })();
+            let one = profile::phase("seg-read", || {
+                (|| -> io::Result<()> {
+                    let mut out = File::create(&payload)?;
+                    let bytes = vgs2::decrypt_segment_to_file(&mut File::open(&self.path)?, *seg, &key, &mut out)?;
+                    drop(out);
+                    let n = tarx::extract_files(&payload, &wanted)?;
+                    if n != wanted.len() {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "数据段缺少 manifest 所列条目"));
+                    }
+                    done = done.saturating_add(bytes.min(wanted.iter().map(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum()));
+                    prog(done.min(total), total);
+                    Ok(())
+                })()
+            });
             cleanup(&payload);
             one?;
         }
@@ -678,7 +804,13 @@ impl Session {
     }
 
     fn unique_path(&self, wanted: &str) -> String {
-        if !self.nodes.contains_key(wanted) {
+        self.unique_path_pending(wanted, &BTreeSet::new())
+    }
+
+    /// 同 unique_path，但额外避开 `pending` 中本批次已占用的名字
+    /// （暂存条目打包后才写入 nodes，重名去重需要提前记账）。
+    fn unique_path_pending(&self, wanted: &str, pending: &BTreeSet<String>) -> String {
+        if !self.nodes.contains_key(wanted) && !pending.contains(wanted) {
             return wanted.to_string();
         }
         let (parent, base) = match wanted.rsplit_once('/') {
@@ -689,7 +821,7 @@ impl Session {
         let mut i = 2;
         loop {
             let test = format!("{parent}{stem}_{i}{ext}");
-            if !self.nodes.contains_key(&test) {
+            if !self.nodes.contains_key(&test) && !pending.contains(&test) {
                 return test;
             }
             i += 1;
@@ -760,7 +892,7 @@ fn make_manifest_for(nodes: &BTreeMap<String, Node>) -> io::Result<Vec<u8>> {
             let (seg, tar_path) = match &node.source {
                 Source::Existing { seg, tar_path } => (*seg, tar_path.clone()),
                 Source::Dir => (0, String::new()),
-                Source::Staged(_) | Source::Legacy(_) => (0, String::new()),
+                Source::StagedTar { .. } | Source::Legacy(_) => (0, String::new()),
             };
             vgs2::MEntry { name: name.clone(), is_dir: node.is_dir, size: node.size, mtime: node.mtime, seg, tar_path }
         })
@@ -863,40 +995,21 @@ impl Write for ProgressWriter<'_> {
     fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 }
 
-fn disk_items(tree: &Path) -> io::Result<Vec<(PathBuf, String, bool)>> {
-    fn rec(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, String, bool)>) -> io::Result<()> {
-        let mut kids: Vec<PathBuf> = std::fs::read_dir(dir)?.flatten().map(|e| e.path()).collect();
-        kids.sort();
-        for p in kids {
-            let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().replace('\\', "/");
-            let md = std::fs::symlink_metadata(&p)?;
-            if md.is_dir() {
-                out.push((p.clone(), rel, true));
-                rec(base, &p, out)?;
-            } else if md.is_file() {
-                out.push((p, rel, false));
-            }
-        }
-        Ok(())
-    }
-    let mut out = Vec::new();
-    rec(tree, tree, &mut out)?;
-    Ok(out)
-}
-
-fn collect_staged_nodes(src: &Path, name: &str, out: &mut BTreeMap<String, Node>) -> io::Result<()> {
+/// 收集新增源的条目元数据：(节点名, 是否目录, 大小, mtime, 暂存 tar 内路径)。
+/// 目录递归；文件与目录的 arc 均为「目标名 + 相对路径」（与打包进暂存 tar 的路径一致）。
+fn collect_src_entries(src: &Path, name: &str, out: &mut Vec<(String, bool, u64, i64, String)>) -> io::Result<()> {
     let md = std::fs::symlink_metadata(src)?;
     if md.is_dir() {
-        out.insert(name.to_string(), Node { size: 0, is_dir: true, mtime: modified_secs(&md), source: Source::Dir });
+        out.push((name.to_string(), true, 0, modified_secs(&md), name.to_string()));
         let mut kids: Vec<PathBuf> = std::fs::read_dir(src)?.flatten().map(|e| e.path()).collect();
         kids.sort();
         for child in kids {
             let raw = child.file_name().and_then(|x| x.to_str()).unwrap_or("file");
             let child_name = format!("{name}/{}", safe_name(raw, 100));
-            collect_staged_nodes(&child, &child_name, out)?;
+            collect_src_entries(&child, &child_name, out)?;
         }
     } else if md.is_file() {
-        out.insert(name.to_string(), Node { size: md.len(), is_dir: false, mtime: modified_secs(&md), source: Source::Staged(src.to_path_buf()) });
+        out.push((name.to_string(), false, md.len(), modified_secs(&md), name.to_string()));
     }
     Ok(())
 }
@@ -932,11 +1045,24 @@ fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
         }
         Ok(())
     } else if md.is_file() {
-        if let Some(parent) = dst.parent() { std::fs::create_dir_all(parent)?; }
-        std::fs::copy(src, dst).map(|_| ())
+        copy_file_buffered(src, dst)
     } else {
         Ok(())
     }
+}
+
+/// 缓冲文件拷贝。Windows 上 `std::fs::copy`（CopyFileW）生成的副本在首次
+/// 读取时可能被实时防护扫描拖慢一个数量级（本机实测 1 GiB 冷读 6.5s → 0.6s），
+/// 保险箱的暂存/物化等热路径统一走大缓冲手动拷贝。
+fn copy_file_buffered(src: &Path, dst: &Path) -> io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut r = std::io::BufReader::with_capacity(1 << 20, File::open(src)?);
+    let mut w = std::io::BufWriter::with_capacity(1 << 20, File::create(dst)?);
+    std::io::copy(&mut r, &mut w)?;
+    w.flush()?;
+    Ok(())
 }
 
 fn modified_secs(md: &std::fs::Metadata) -> i64 {

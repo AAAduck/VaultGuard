@@ -252,7 +252,19 @@
   <ul>
     <li><strong>测试</strong>：<code>cargo test --release</code> —— 35 个自动化测试，覆盖既有容器与保险箱功能，以及 VGS2 向量、追加索引、损坏回退、压缩和 VGS1 升级；</li>
     <li><strong>依赖审计</strong>：<code>cargo audit</code> 每周定时在 CI 自动运行，Cargo.lock 变更时也会触发；</li>
+    <li><strong>性能基准</strong>：<code>tools/run_vgs2_bench.ps1</code> + <code>vgs2-bench</code>（本机跑，CI 不跑）；目标档（1 万文件 / 5GiB）实测：打开 0.22s、首次保存 26s、全量压缩 50s（原始数据见 <code>docs/benchmarks/</code>）；</li>
     <li><strong>可复现构建</strong>：源码公开，任何人可自行构建比对产物哈希。</li>
+  </ul>
+</section>
+
+<section id="roadmap">
+  <h2>后续路线（v2.1+）</h2>
+  <ul>
+    <li><strong>性能纵深</strong>：多段并行加解密（突破 GCM 单线程上限）、增量段级 GC（删除大文件只重写所在段）；</li>
+    <li><strong>分发与信任</strong>：代码签名（消除 SmartScreen 冷启动警告）、winget / Scoop 上架、公开格式规范文档；</li>
+    <li><strong>产品项</strong>：多语言（英文）、安装版 + 右键菜单集成；</li>
+    <li><strong>生态</strong>：第三方安全审计、跨平台只读/导出命令行工具（macOS / Linux）；</li>
+    <li><strong>不做</strong>：对抗扫描、云同步 / 账号 / 遥测、密码管理器扩张。</li>
   </ul>
 </section>
 

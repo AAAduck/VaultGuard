@@ -12,6 +12,7 @@ mod crypto;
 mod engine;
 mod gui;
 mod paths;
+mod profile;
 mod safe;
 mod shells;
 mod tarx;

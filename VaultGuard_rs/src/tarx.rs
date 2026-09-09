@@ -85,6 +85,17 @@ pub fn pack_entries_to_writer<W: Write>(items: &[(PathBuf, String, bool)], w: W)
     Ok(())
 }
 
+/// 把多个根条目（含目录递归）打包进一个 tar。VGS2 批量暂存用：add 时把本次
+/// 新增的所有文件合并成单个 tar，保存时作为一段加密，避免逐文件小读写。
+pub fn pack_recursive_entries<W: Write>(items: &[(PathBuf, String)], w: W) -> io::Result<()> {
+    let mut b = tar::Builder::new(w);
+    for (src, arc) in items {
+        append_recursive(&mut b, src, arc)?;
+    }
+    b.finish()?;
+    Ok(())
+}
+
 fn append_one<W: Write>(b: &mut tar::Builder<W>, abs: &Path, arc: &str, is_dir: bool) -> io::Result<()> {
     let md = std::fs::symlink_metadata(abs)?;
     if is_dir != md.is_dir() || (!is_dir && !md.is_file()) {
@@ -102,7 +113,10 @@ fn append_one<W: Write>(b: &mut tar::Builder<W>, abs: &Path, arc: &str, is_dir: 
     if is_dir {
         b.append_data(&mut header, arc, io::empty())?;
     } else {
-        b.append_data(&mut header, arc, File::open(abs)?)?;
+        // BufReader：tar crate 内部用 8 KiB 小片 io::copy 读源文件，
+        // 包一层大缓冲避免每 8 KiB 一次系统调用（大文件打包的吞吐瓶颈）。
+        let f = std::io::BufReader::with_capacity(1 << 20, File::open(abs)?);
+        b.append_data(&mut header, arc, f)?;
     }
     Ok(())
 }
@@ -223,7 +237,8 @@ pub fn extract_files(tp: &Path, wanted: &[(String, PathBuf)]) -> io::Result<usiz
         want.insert(tar_path.as_str(), dst);
     }
     let f = File::open(tp)?;
-    let mut ar = tar::Archive::new(f);
+    // tar crate 的条目读取用 8 KiB 小片，包 BufReader 避免逐片系统调用。
+    let mut ar = tar::Archive::new(std::io::BufReader::with_capacity(1 << 20, f));
     let mut n = 0usize;
     for entry in ar.entries()? {
         let mut e = entry?;
@@ -238,10 +253,40 @@ pub fn extract_files(tp: &Path, wanted: &[(String, PathBuf)]) -> io::Result<usiz
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut out = File::create(dst)?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, File::create(dst)?);
         std::io::copy(&mut e, &mut out)?;
+        out.flush()?;
         n += 1;
     }
+    Ok(n)
+}
+
+/// 从已认证的临时 tar 中把「存活条目」原样转发到新的 tar 流（压缩/换口令用）。
+/// wanted: (原 tar 路径, 转发后 tar 路径) —— 压缩时两者相同（manifest 的 tar_path 保留）。
+/// 非存活条目自动跳过；返回转发条目数。
+pub fn relay_files<W: Write>(tp: &Path, wanted: &[(String, String)], w: W) -> io::Result<usize> {
+    let mut map = std::collections::BTreeMap::new();
+    for (from, to) in wanted {
+        map.insert(from.as_str(), to.as_str());
+    }
+    let f = File::open(tp)?;
+    let mut ar = tar::Archive::new(std::io::BufReader::with_capacity(1 << 20, f));
+    let mut b = tar::Builder::new(w);
+    let mut n = 0usize;
+    for entry in ar.entries()? {
+        let e = entry?;
+        let raw = e.path()?.to_string_lossy().to_string();
+        let name = raw.trim_matches('/').to_string();
+        let Some(out_arc) = map.get(name.as_str()) else { continue };
+        let _ = sanitize_rel(&name)?;
+        if !e.header().entry_type().is_file() {
+            continue;
+        }
+        let mut header = e.header().clone();
+        b.append_data(&mut header, out_arc, e)?;
+        n += 1;
+    }
+    b.finish()?;
     Ok(n)
 }
 

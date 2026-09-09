@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::crypto::{ct_eq, Gcm};
+use crate::profile;
 
 pub const MAGIC: &[u8; 4] = b"VGS2";
 pub const HDR_SZ: usize = 4 + 1 + 4 + 4 + 1 + 16 + 12 + 8; // 50
@@ -300,9 +301,11 @@ where
         f,
         g: Some(Gcm::new(key, &nonce, &seg_aad(seg_type, seq))),
         len: 0,
+        pend: Vec::with_capacity(ENC_BUF + (1 << 12)),
+        start: 0,
     };
-    write_plain(&mut writer)?;
-    let len = writer.finish()?;
+    profile::phase("seg-pack", || write_plain(&mut writer))?;
+    let len = profile::phase("seg-finish", || writer.finish())?;
     if len > MAX_SEGMENT_LEN {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "段数据超出格式上限"));
     }
@@ -311,21 +314,53 @@ where
     writer.f.seek(SeekFrom::Start(header_offset))?;
     writer.f.write_all(&encode_seg_head(&head))?;
     writer.f.seek(SeekFrom::Start(end))?;
-    writer.f.sync_all()?;
+    profile::phase("seg-sync", || writer.f.sync_all())?;
     Ok(SegmentMeta { head, body_offset: header_offset + SEG_HDR_SZ as u64 })
 }
+
+/// 加密写缓冲：tar 打包以 8 KiB 小片喂入，这里聚合成大块再加密写盘，
+/// 避免每片一次分配与 8 KiB 级小系统调用（5 GiB 场景可差一个数量级）。
+const ENC_BUF: usize = 1 << 20;
 
 struct SegmentEncWriter<'a> {
     f: &'a mut File,
     g: Option<Gcm>,
     len: u64,
+    pend: Vec<u8>,
+    start: usize,
 }
 
 impl SegmentEncWriter<'_> {
     fn finish(&mut self) -> io::Result<u64> {
+        // 加密残余明文（不足 ENC_BUF 的尾部）
+        if self.start < self.pend.len() {
+            let g = self.g.as_mut().expect("segment writer finished twice");
+            let mut ct = self.pend[self.start..].to_vec();
+            g.crypt_in_place(&mut ct);
+            g.ghash_data(&ct);
+            self.f.write_all(&ct)?;
+        }
         let tag = self.g.take().expect("segment writer finished twice").finish_tag();
         self.f.write_all(&tag)?;
         Ok(self.len)
+    }
+
+    fn flush_full(&mut self) -> io::Result<()> {
+        while self.pend.len() - self.start >= ENC_BUF {
+            profile::phase("seg-crypt-write", || {
+                let g = self.g.as_mut().expect("segment writer finished");
+                let mut ct = self.pend[self.start..self.start + ENC_BUF].to_vec();
+                g.crypt_in_place(&mut ct);
+                g.ghash_data(&ct);
+                self.f.write_all(&ct)
+            })?;
+            self.start += ENC_BUF;
+        }
+        if self.start > 0 {
+            self.pend.drain(..self.start);
+            self.start = 0;
+        }
+        Ok(())
     }
 }
 
@@ -335,16 +370,14 @@ impl Write for SegmentEncWriter<'_> {
         if self.len.checked_add(add).filter(|n| *n <= MAX_SEGMENT_LEN).is_none() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "段数据超出格式上限"));
         }
-        let mut ct = buf.to_vec();
-        let g = self.g.as_mut().expect("segment writer finished");
-        g.crypt_in_place(&mut ct);
-        g.ghash_data(&ct);
-        self.f.write_all(&ct)?;
+        self.pend.extend_from_slice(buf);
+        self.flush_full()?;
         self.len += add;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.flush_full()?;
         self.f.flush()
     }
 }

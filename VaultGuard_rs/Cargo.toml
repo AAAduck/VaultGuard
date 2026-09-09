@@ -1,6 +1,6 @@
 [package]
 name = "vaultguard"
-version = "1.4.0"
+version = "2.0.0"
 edition = "2021"
 description = "VaultGuard - 网盘伪装加密保险箱"
 license = "MIT"
@@ -8,6 +8,11 @@ license = "MIT"
 [[bin]]
 name = "vaultguard"
 path = "src/main.rs"
+test = false
+
+[[bin]]
+name = "vgs2-bench"
+path = "src/bin/vgs2_bench.rs"
 test = false
 
 [lib]

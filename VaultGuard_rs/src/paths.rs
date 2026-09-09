@@ -293,10 +293,15 @@ pub fn cleanup(path: &Path) {
 }
 
 fn wipe_tree(p: &Path) {
+    let zero = vec![0u8; 1 << 20];
+    wipe_tree_with(p, &zero);
+}
+
+fn wipe_tree_with(p: &Path, zero: &[u8]) {
     if p.is_dir() {
         if let Ok(rd) = std::fs::read_dir(p) {
             for e in rd.flatten() {
-                wipe_tree(&e.path());
+                wipe_tree_with(&e.path(), zero);
             }
         }
     } else if p.is_file() {
@@ -304,7 +309,9 @@ fn wipe_tree(p: &Path) {
             let len = f.metadata().map(|m| m.len()).unwrap_or(0);
             use std::io::{Seek, SeekFrom, Write as IoWrite};
             let _ = f.seek(SeekFrom::Start(0));
-            let zero = [0u8; 4096];
+            // 1 MiB 覆写块，避免 4 KiB 级小写拖慢大批量清理；
+            // 不逐文件 fsync —— 覆写擦除是 best-effort（SSD 介质残留需整体擦除），
+            // 且文件随即删除，逐文件同步在 1 万文件场景可占压缩耗时近半。
             let mut left = len;
             while left > 0 {
                 let n = left.min(zero.len() as u64) as usize;
@@ -313,7 +320,6 @@ fn wipe_tree(p: &Path) {
                 }
                 left -= n as u64;
             }
-            let _ = f.sync_all();
         }
     }
 }
