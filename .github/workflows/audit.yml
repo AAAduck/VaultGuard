@@ -1,0 +1,32 @@
+name: Dependency Audit
+
+# 依赖漏洞审计（cargo audit）：每周一自动跑 + Cargo.lock 变更即跑 + 可手动触发。
+# 存在任何已知漏洞时任务失败（exit code 非 0）。
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['VaultGuard_rs/Cargo.lock']
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit（RustSec 公告库）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: VaultGuard_rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: 依赖漏洞审计
+        run: cargo audit

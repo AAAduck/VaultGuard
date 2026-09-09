@@ -1,6 +1,7 @@
 # VaultGuard — 把文件变成一张"图片"的加密保险箱
 
 ![CI](https://github.com/AAAduck/VaultGuard/actions/workflows/ci.yml/badge.svg)
+[![Docs](https://img.shields.io/badge/文档-场景%20FAQ%20威胁模型%20格式规范-0f766e)](https://AAAduck.github.io/VaultGuard/)
 
 ## 这是个什么软件？
 
@@ -39,6 +40,18 @@
 
 **还原**：把加密产物（那张"图片"）拖回窗口，输入同一个口令，点「还原 VaultGuard 文件」，文件就回来了。还原不会动你的原文件，加密和还原都生成新副本。
 
+## 安装方式
+
+单文件免安装，三种渠道任选（前两种已就绪，包管理器上架进行中）：
+
+| 方式 | 命令 / 步骤 | 状态 |
+| --- | --- | --- |
+| 手动下载（推荐） | 到 [GitHub Releases](https://github.com/AAAduck/VaultGuard/releases) 下载 `VaultGuard.exe`，并下载同目录的 `SHA256SUMS` 执行 `sha256sum -c SHA256SUMS` 校验完整性 | ✅ 可用 |
+| Scoop | `scoop install vaultguard`（清单在 `distrib/scoop/`，含自动更新） | 🚧 待上架 |
+| winget | `winget install AAAduck.VaultGuard`（清单在 `distrib/winget/`） | 🚧 待代码签名后上架 |
+
+更新 = 下载新版 exe 替换旧文件（官方发行件由 CI 构建，每次打 tag 自动生成，版本号/公司信息内嵌）。上架与提交指引见 `distrib/README.md`。
+
 ## 常见问题
 
 **Q：忘记口令了怎么办？**
@@ -68,6 +81,12 @@
 2. **提交误报申诉**：到 [opentip.kaspersky.com](https://opentip.kaspersky.com) 上传 exe，选 False Positive，卡巴更新病毒库后全局解除；
 3. **本地加白名单**：杀软排除列表加入 exe（或整个文件夹），应急可先用；
 4. 官方发行件来自 GitHub Actions CI 构建（版本号/公司信息内嵌），每次打 tag 自动生成。
+
+**Q：这个项目开源吗？什么许可证？**
+开源（MIT），源码、构建配置、测试全部公开，任何人可自行构建比对产物哈希。格式规范、威胁模型等见[文档站](https://AAAduck.github.io/VaultGuard/)。
+
+**Q：怎么安装和更新？**
+单文件免安装：下载 exe 即用，更新即下载新版本替换。也可用 Scoop 管理（`scoop install vaultguard`，待上架）；详见上「安装方式」一节。
 
 ## 进阶：隐私保险箱（长期整理推荐）
 
@@ -118,6 +137,8 @@ VaultGuard.exe "D:\资料\项目文件夹" --png --password-stdin
 ```text
 VaultGuard.exe          # Windows 发布程序（图形界面 + 命令行，单文件）
 README.md               # 使用说明
+docs/                   # 文档站（GitHub Pages 单页：场景 / FAQ / 威胁模型 / 格式规范）
+distrib/                # 分发清单（winget / scoop）与上架指引
 VaultGuard_rs/          # Rust 源码、构建配置与内嵌资源
 outputs/                # 默认输出目录
 ```
@@ -126,6 +147,7 @@ outputs/                # 默认输出目录
 
 ## 版本记录
 
+- **v1.4.1（2026-09，运维/发布）**：依赖审计接入 CI（`cargo audit` 每周自动跑 + Cargo.lock 变更即跑）；winget / scoop 上架清单与提交指引（`distrib/`）；文档站上线（`docs/`，GitHub Pages 单页：场景 / FAQ / 威胁模型 / 格式规范）；README 补安装方式与 FAQ；仓库补 MIT LICENSE（Cargo.toml 同步 license 字段）。
 - **v1.4（2026-09）**：保险箱「添加时按类型归档」（可选开关）——添加文件自动按扩展名进 `图片 / 文档 / 压缩包 / 音频 / 视频 / 其他` 子目录，文件夹放根目录，同分类重名自动加后缀。同时完成安全审查整改：启动清扫不再误删长时间打开的保险箱/解密预览（活跃标记心跳）；明文临时 tar 改为覆写擦除；文件名保留设备名（CON/NUL/COM1-9 等）自动让位；DOCX 壳拒绝超长记录（防恶意容器崩溃）；嵌套条目导出保留目录层级；分享说明复制含口令文案前增加剪贴板历史确认。
 - **v1.3.3（2026-09）**：修复 CI 产物资源嵌入被静默跳过（根因：`.rc` 路径反斜杠被编译器当转义符）——官方发行 exe 补全图标/清单/版本信息；CI 构建后新增资源校验，缺失即失败；根目录与 Release 产物统一同哈希。
 - **v1.3.2（2026-09）**：修复 CI 上 zig 路径识别（内部构建修复，对用户无感）。
@@ -138,3 +160,7 @@ outputs/                # 默认输出目录
 ## 免责声明
 
 请仅对自己拥有或获授权处理的文件使用本工具，并自行保留重要文件的原始备份。作者不对因误操作、文件损坏或第三方服务处理方式导致的数据丢失负责。
+
+## 许可证
+
+MIT License — Copyright © 2026 AAAduck。详见 [LICENSE](LICENSE)。

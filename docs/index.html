@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VaultGuard — 网盘伪装加密保险箱</title>
+<meta name="description" content="VaultGuard：把私密文件加密成普通图片或 Word 文档的离线单文件保险箱。场景、FAQ、威胁模型与公开格式规范。">
+<style>
+  :root{
+    --ink:#1f2937; --sub:#6b7280; --line:#e5e7eb;
+    --accent:#0f766e; --accent-soft:#ccfbf1;
+    --warn-bg:#fff7ed; --warn-line:#fdba74; --warn-ink:#9a3412;
+    --code-bg:#f3f4f6; --ok:#166534;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+       color:var(--ink);line-height:1.7;background:#fff}
+  header.hero{background:linear-gradient(160deg,#0f766e 0%,#115e59 60%,#134e4a 100%);
+              color:#fff;padding:56px 20px 48px;text-align:center}
+  header.hero h1{margin:0 0 10px;font-size:34px;letter-spacing:1px}
+  header.hero p{margin:0 auto;max-width:640px;font-size:16px;opacity:.92}
+  header.hero .tag{display:inline-block;margin-top:16px;padding:4px 14px;border:1px solid rgba(255,255,255,.45);
+                   border-radius:999px;font-size:13px;opacity:.95}
+  nav{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);z-index:10}
+  nav .wrap{max-width:860px;margin:0 auto;display:flex;flex-wrap:wrap;gap:2px;padding:0 16px}
+  nav a{display:inline-block;padding:10px 12px;font-size:14px;color:var(--sub);text-decoration:none}
+  nav a:hover{color:var(--accent)}
+  main{max-width:860px;margin:0 auto;padding:8px 20px 60px}
+  section{margin-top:44px}
+  h2{font-size:22px;border-left:4px solid var(--accent);padding-left:10px;margin-bottom:8px}
+  h3{font-size:16px;margin:22px 0 6px}
+  .lead{color:var(--sub);font-size:15px;margin-top:4px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px}
+  .card{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fafafa}
+  .card b{color:var(--accent);display:block;margin-bottom:4px}
+  .card p{margin:0;font-size:14px}
+  .warn{border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:10px;
+        padding:14px 16px;color:var(--warn-ink);font-size:14px;margin-top:14px}
+  .warn b{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f9fafb;white-space:nowrap}
+  code{background:var(--code-bg);border-radius:4px;padding:1px 6px;font-family:Consolas,"Courier New",monospace;font-size:13px}
+  pre{background:#111827;color:#e5e7eb;border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;color:inherit;padding:0}
+  ol,ul{padding-left:22px;font-size:15px}
+  li{margin:4px 0}
+  details{ border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:8px 0}
+  summary{cursor:pointer;font-weight:600;color:var(--accent)}
+  footer{border-top:1px solid var(--line);margin-top:60px;padding:20px;text-align:center;
+         color:var(--sub);font-size:13px}
+  footer a{color:var(--accent);text-decoration:none}
+  .pill{display:inline-block;background:var(--accent-soft);color:var(--accent);border-radius:999px;
+        padding:2px 10px;font-size:12px;margin-left:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <h1>VaultGuard</h1>
+  <p>把私密文件加密成一张普通图片（或 Word 文档）的保险箱。存网盘、发给别人都看不出来，只有知道口令的人能还原。</p>
+  <span class="tag">离线 · 单文件 · 免安装 · 开源（MIT）</span>
+</header>
+
+<nav>
+  <div class="wrap">
+    <a href="#intro">是什么</a>
+    <a href="#scenarios">场景</a>
+    <a href="#quickstart">三步上手</a>
+    <a href="#faq">FAQ</a>
+    <a href="#threat">威胁模型</a>
+    <a href="#format">格式规范</a>
+    <a href="#install">安装与校验</a>
+    <a href="#build">构建与审计</a>
+  </div>
+</nav>
+
+<main>
+
+<section id="intro">
+  <h2>这是什么？</h2>
+  <p class="lead">一句话：把你的私密文件变成一张<strong>看起来完全正常</strong>的图片或 Word 文档，只有知道口令的人能把它还原回来。</p>
+  <p>例如你有一份工资单想存网盘：用 VaultGuard 加密后，网盘里出现的是一张风景图 <code>VG_20260906_3f8a.png</code>，谁看了都以为就是张图；需要时拖回软件、输入口令，工资单原样回来。全程在本机完成，<strong>不需要联网</strong>、不注册账号，只有一个约 5MB 的 exe 文件。</p>
+</section>
+
+<section id="scenarios">
+  <h2>什么场景有用</h2>
+  <div class="cards">
+    <div class="card"><b>网盘存私密文件</b><p>证件扫描件、工资单、日记、病历……加密后再上传，网盘只能存一张"图片"，看不到读不出内容。</p></div>
+    <div class="card"><b>发给指定的人</b><p>把加密"图片"通过微信/邮件发出，口令用电话等<strong>另一渠道</strong>告知；对方装入软件、输入口令即可还原。</p></div>
+    <div class="card"><b>防随手翻看</b><p>文件伪装成图片放电脑里，家人朋友、借电脑的人不会起疑点开；翻到了也打不开。</p></div>
+    <div class="card"><b>长期整理资料</b><p>「隐私保险箱」一个口令对应一个资料库，随时加文件、删文件，像加密文件夹一样。</p></div>
+  </div>
+  <div class="warn">
+    <b>什么场景别用它（诚实说明）</b>
+    忘记口令，神仙也救不回来——没有"找回口令"功能，这是安全性的代价；它防的是"人"，不保证骗过网盘自动扫描系统（加密数据的统计特征理论上可被识别），<strong>请勿存放违法违规内容</strong>；面对专业黑客和取证分析，请使用 VeraCrypt 等专业工具。
+  </div>
+</section>
+
+<section id="quickstart">
+  <h2>三步上手</h2>
+  <ol>
+    <li><strong>添加文件</strong>：把文件或文件夹拖进窗口（或点左栏「文件」「文件夹」按钮）；</li>
+    <li><strong>设置口令</strong>：在「口令」区输入并确认。口令是唯一的钥匙，忘了就打不开，请务必记牢（重要口令建议抄在纸上放安全处）；</li>
+    <li><strong>选外壳、点加密</strong>：选伪装外壳（PNG / JPG / DOCX），点「开始加密」。产物默认保存在 <code>outputs\</code>。</li>
+  </ol>
+  <p><strong>还原</strong>：把加密产物拖回窗口，输入同一口令，点「还原 VaultGuard 文件」。加密与还原都生成新副本，<strong>绝不动原文件</strong>。</p>
+  <p><strong>命令行</strong>：也支持拖拽与 CLI，例如 <code>VaultGuard.exe "D:\资料\项目文件夹" --png --password-stdin</code>（用标准输入传口令，避免进命令行历史）。</p>
+</section>
+
+<section id="faq">
+  <h2>常见问题</h2>
+
+  <details open>
+    <summary>忘记口令了怎么办？</summary>
+    <p>无法找回。没有后门，谁都解不开（包括作者）。这是安全性的组成部分，请设置自己记得住的口令。</p>
+  </details>
+
+  <details>
+    <summary>加密后的"图片"发到网上，别人能看出破绽吗？</summary>
+    <p>别人看到的是一张正常显示的图片。但内容已加密，懂技术的人或网盘的自动系统<strong>有可能</strong>识别出"这个文件里藏了东西"。用来保护个人隐私没问题，不要用来藏违规内容。</p>
+  </details>
+
+  <details>
+    <summary>口令输错了会怎样？</summary>
+    <p>提示"认证失败：口令错误"，文件不会损坏，重新输对口令即可（解密侧先认证、通过后才落位）。</p>
+  </details>
+
+  <details>
+    <summary>加密后原来的文件还在吗？</summary>
+    <p>在。加密和还原都生成新文件，绝不动你的原文件。</p>
+  </details>
+
+  <details>
+    <summary>这个软件联网吗？会收集信息吗？</summary>
+    <p>完全离线运行，没有任何联网、上传、遥测功能。</p>
+  </details>
+
+  <details>
+    <summary>不设口令会怎么样？</summary>
+    <p>文件使用"内置密钥"——任何拿到本软件的人都能解密，只防"别人不知道有这个软件"。存敏感文件请务必设置口令。</p>
+  </details>
+
+  <details>
+    <summary>怎么把加密文件发给别人？</summary>
+    <p>把"图片"文件发给对方，再用<strong>别的渠道</strong>（电话、语音等）告知口令；对方需要同样装有 VaultGuard。软件内「分享说明」按钮会生成含口令的复制文案。</p>
+  </details>
+
+  <details>
+    <summary>杀毒软件报毒（如 VHO:Trojan-PSW…）怎么办？</summary>
+    <p>这是对<strong>未签名、新编译</strong>程序常见的启发式误报（VHO = 启发式判定，非已知病毒库命中）。源码完全公开、完全离线。处理：①到 GitHub Releases 下载 <code>SHA256SUMS</code> 校验 exe 未被篡改；②到 <a href="https://opentip.kaspersky.com" target="_blank" rel="noopener">opentip.kaspersky.com</a> 提交误报申诉；③本地加白名单应急。</p>
+  </details>
+
+  <details>
+    <summary>如何安装与更新？</summary>
+    <p>单文件免安装：下载 exe 即用。更新即下载新版本 exe 替换。Scoop 上架后可用 <code>scoop install vaultguard</code> 管理；winget 待代码签名后上架（见<a href="#install">安装与校验</a>）。</p>
+  </details>
+
+  <details>
+    <summary>这个项目开源吗？</summary>
+    <p>开源，MIT 许可证。源码、构建配置、测试全部公开在 <a href="https://github.com/AAAduck/VaultGuard" target="_blank" rel="noopener">github.com/AAAduck/VaultGuard</a>，可复现构建。</p>
+  </details>
+</section>
+
+<section id="threat">
+  <h2>威胁模型</h2>
+  <p class="lead">VaultGuard 解决的问题是：<strong>让普通"人"看不到、读不出你的文件</strong>。它不是万能盾牌，能防什么、防不了什么，如实列出。</p>
+
+  <table>
+    <tr><th>防护目标</th><th>是否防护</th><th>说明</th></tr>
+    <tr><td>网盘、聊天工具的服务方/管理员</td><td>✅ 内容层面</td><td>密文内容无法读取；但文件的存在与统计特征可能被系统识别为"非普通图片"</td></tr>
+    <tr><td>拿到文件的人（同事/家人/陌生人）</td><td>✅</td><td>显示为普通图片；即便怀疑也无口令无法解密</td></tr>
+    <tr><td>拿到程序与源码的攻击者</td><td>✅（口令加密）</td><td>Argon2id(64MiB, t=3, p=1) 派生口令密钥，无后门、无找回</td></tr>
+    <tr><td>网盘自动扫描/取证分析</td><td>⚠️ 有限</td><td>密文统计特征理论上可被识别；专业取证请用 VeraCrypt</td></tr>
+    <tr><td>忘记口令</td><td>❌ 无解</td><td>有意为之：不存在绕过路径</td></tr>
+    <tr><td>已删除数据的介质残留</td><td>⚠️ 有限</td><td>程序内临时数据用后覆写擦除；但文件系统/固态盘层面残留需整体擦除介质才可消除</td></tr>
+  </table>
+
+  <h3>设计上的安全措施</h3>
+  <ul>
+    <li><strong>认证先行</strong>：AES-256-GCM 认证标记常量时间比较；解密侧先认证、通过后才把明文写入磁盘；</li>
+    <li><strong>临时数据擦除</strong>：保险箱会话关闭/程序退出时，解密出的临时明文用覆写方式擦除后删除；</li>
+    <li><strong>防跨壳改名</strong>：AAD 绑定格式版本与外壳类型，把加密文件从 PNG 改名成 JPG 会被认证拒绝；</li>
+    <li><strong>容错重写</strong>：保险箱保存采用写临时容器→自校验→原子替换，旧箱留作回滚、成功后擦除；</li>
+    <li><strong>完全离线</strong>：无网络、无遥测、无账号，不引入第三方依赖的上传路径。</li>
+  </ul>
+</section>
+
+<section id="format">
+  <h2>公开格式规范</h2>
+  <p class="lead">容器格式全部公开、字节级可复现（VGS1 永远可解；VGS2 为规划中的性能格式，规范一并公开）。所有整数均为大端（Big-Endian）。</p>
+
+  <h3>伪装容器（VG 系列）— 单次加密产物</h3>
+  <table>
+    <tr><th>格式</th><th>用途</th><th>密钥派生</th></tr>
+    <tr><td><code>VG\x03</code></td><td>口令加密（推荐）</td><td>Argon2id：m=64MiB, t=3, p=1，随机 16 字节盐；参数写入文件头，未来调整不影响旧文件解密</td></tr>
+    <tr><td><code>VG\x02</code></td><td>内置密钥（无口令）</td><td>内置主密钥 + HKDF-SHA256，仅防随手翻看</td></tr>
+    <tr><td><code>VG\x01</code></td><td>旧版产物</td><td>仅解密兼容；PBKDF2（600,000 次迭代）</td></tr>
+  </table>
+  <ul>
+    <li><strong>加密算法</strong>：AES-256-GCM 流式（GHASH 使用 RustCrypto <code>ghash</code>），认证标记 16 字节，常量时间比较；</li>
+    <li><strong>AAD</strong>：绑定格式版本与外壳类型 → 跨外壳改名被拒绝；</li>
+    <li><strong>外壳</strong>：PNG（私有块 <code>vGDT</code>）/ JPG（APP15 段）/ DOCX（<code>word/vaultData.bin</code>），外层带正常封面图，数据藏在容器结构中；</li>
+    <li><strong>明文路径</strong>：加密侧 tar 流直通加密管道，明文不落盘；解密侧先认证后落位，临时明文用后覆写擦除。</li>
+  </ul>
+
+  <h3>隐私保险箱（VGS1，<code>.vgsafe</code>）</h3>
+  <table>
+    <tr><th>字段</th><th>长度</th><th>内容</th></tr>
+    <tr><td>Magic</td><td>4B</td><td><code>"VGS1"</code></td></tr>
+    <tr><td>kid / m / t / p</td><td>1+4+4+1B</td><td>密钥派生类型与 Argon2id 参数（m=64MiB, t=3, p=1）</td></tr>
+    <tr><td>salt</td><td>16B</td><td>随机盐</td></tr>
+    <tr><td>nonce</td><td>12B</td><td>GCM nonce</td></tr>
+    <tr><td>主体</td><td>变长</td><td>AES-256-GCM(tar 流) + 16B 认证标记；AAD = <code>"VGS1"</code></td></tr>
+  </table>
+  <ul>
+    <li><strong>打开</strong>：整箱解密到临时工作树，GCM 认证通过才可见；会话关闭/退出时覆写擦除；</li>
+    <li><strong>保存</strong>：整箱重写 —— 写临时容器、自校验、原子替换旧箱（旧箱留作回滚，成功后擦除）；</li>
+    <li><strong>防误删</strong>：启动清扫带活跃标记心跳，不会误删长时间打开的保险箱/解密预览。</li>
+  </ul>
+
+  <h3>VGS2（规划中）— 性能路线格式 <span class="pill">尚未接管读写</span></h3>
+  <p>目标：打开只解 manifest、保存按段追加，支撑"1 万文件、5GB 级"资料库的日常管理。格式规范已固化：</p>
+  <ul>
+    <li><strong>全局头</strong> 50B：<code>"VGS2"</code>(4) + kid(1) + Argon2id m/t/p + salt(16) + nonce(12) + reserve(8)；</li>
+    <li><strong>段链布局</strong>：数据段（<code>0x01</code>）/ manifest 段（<code>0x02</code>）追加式串接；段头 33B = 类型(1) + 序号(8) + 数据长度(8) + nonce(12) + CRC32(4)；</li>
+    <li><strong>防重排/防截断/防拼接</strong>：段序号进 AAD（<code>"VGS2" + 段类型 + 序号(8B)</code>），篡改即认证失败；段头自带 CRC32；</li>
+    <li><strong>manifest</strong>：扁平条目 <code>[name_len(2)][name][is_dir(1)][size(8)][mtime(8)][seg(8)][tar_path_len(2)][tar_path]</code>；名字/路径上限 4096B，条目上限 100 万（防恶意声明超大分配）。</li>
+  </ul>
+</section>
+
+<section id="install">
+  <h2>安装与校验</h2>
+  <h3>手动下载（当前推荐）</h3>
+  <ol>
+    <li>到 <a href="https://github.com/AAAduck/VaultGuard/releases" target="_blank" rel="noopener">GitHub Releases</a> 下载 <code>VaultGuard.exe</code> 与 <code>SHA256SUMS</code>；</li>
+    <li>把两者放到同一目录，执行校验：</li>
+  </ol>
+  <pre><code>sha256sum -c SHA256SUMS   # 输出 "VaultGuard.exe: OK" 即文件未被篡改</code></pre>
+  <p>官方发行件由 GitHub Actions CI 构建，版本号/公司信息内嵌；每次打 tag 自动生成 Release。</p>
+
+  <h3>Scoop</h3>
+  <p>清单已就绪（<code>distrib/scoop/VaultGuard.json</code>，含自动更新配置），提交到 <a href="https://github.com/ScoopInstaller/Extras" target="_blank" rel="noopener">ScoopInstaller/Extras</a> 或自有 bucket 后即可：</p>
+  <pre><code>scoop install vaultguard</code></pre>
+
+  <h3>winget</h3>
+  <p>清单已就绪（<code>distrib/winget/</code>，portable 单文件），上架 microsoft/winget-pkgs 需要清单代码签名，随项目代码签名决策落地。</p>
+</section>
+
+<section id="build">
+  <h2>构建与安全审计</h2>
+  <ul>
+    <li><strong>测试</strong>：<code>cargo test --release</code> —— 30 个自动化测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期、口令更换、选择性还原、条目重命名/移动、目录前缀整理、嵌套导出、DOCX 超长记录拒绝、启动清扫、口令提醒）；</li>
+    <li><strong>依赖审计</strong>：<code>cargo audit</code> 每周定时在 CI 自动运行，Cargo.lock 变更时也会触发；</li>
+    <li><strong>可复现构建</strong>：源码公开，任何人可自行构建比对产物哈希。</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  <p><a href="https://github.com/AAAduck/VaultGuard" target="_blank" rel="noopener">GitHub 仓库</a> · MIT 许可证 · Copyright © 2026 AAAduck</p>
+  <p>请仅对自己拥有或获授权处理的文件使用本工具，并自行保留重要文件备份。</p>
+</footer>
+
+</body>
+</html>

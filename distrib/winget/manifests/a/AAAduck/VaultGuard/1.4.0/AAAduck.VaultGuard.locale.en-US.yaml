@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: AAAduck.VaultGuard
+PackageVersion: 1.4.0
+PackageLocale: en-US
+Publisher: AAAduck
+PublisherUrl: https://github.com/AAAduck
+PackageName: VaultGuard
+PackageUrl: https://github.com/AAAduck/VaultGuard
+License: MIT
+LicenseUrl: https://github.com/AAAduck/VaultGuard/blob/main/LICENSE
+ShortDescription: Hide encrypted files inside ordinary images or Word documents
+Description: VaultGuard encrypts your private files with AES-256-GCM and hides the ciphertext inside an ordinary-looking PNG image, JPG image, or Word document, so cloud drives and casual viewers see nothing suspicious. A password derived with Argon2id is required to restore the files. Fully offline: no account, no upload, no telemetry, a single portable exe.
+Moniker: vaultguard
+Tags:
+- encryption
+- privacy
+- vault
+- camouflage
+- offline
+- security
+ReleaseNotesUrl: https://github.com/AAAduck/VaultGuard/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

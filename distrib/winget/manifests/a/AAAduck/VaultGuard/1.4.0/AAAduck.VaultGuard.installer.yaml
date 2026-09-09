@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: AAAduck.VaultGuard
+PackageVersion: 1.4.0
+InstallerType: portable
+Installers:
+- Architecture: x64
+  InstallerType: portable
+  InstallerUrl: https://github.com/AAAduck/VaultGuard/releases/download/v1.4.0/VaultGuard.exe
+  InstallerSha256: 8F0D0B360E749C1FC2019E94166AFA7EDB6E11DD77195D9BFA393FAA50B71037
+  Commands:
+  - VaultGuard
+ManifestType: installer
+ManifestVersion: 1.6.0

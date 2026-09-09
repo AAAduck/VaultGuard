@@ -3,6 +3,7 @@ name = "vaultguard"
 version = "1.4.0"
 edition = "2021"
 description = "VaultGuard - 网盘伪装加密保险箱"
+license = "MIT"
 
 [[bin]]
 name = "vaultguard"
