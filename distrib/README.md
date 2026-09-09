@@ -45,7 +45,7 @@ Scoop 对清单无签名要求，任选一条：
 ### 每次发版的更新清单
 
 1. 打 tag 触发 CI 生成 Release（`VaultGuard.exe` + `SHA256SUMS`）；
-2. `sha256sum VaultGuard.exe` 拿到新哈希；
+2. `Get-FileHash .\VaultGuard.exe -Algorithm SHA256` 拿到新哈希；
 3. 同步改 `winget/manifests/a/AAAduck/VaultGuard/<版本>/` 下的版本号与
    `InstallerSha256`，以及 `scoop/VaultGuard.json` 的 `version`/`hash`；
 4. scoop 的 `checkver`/`autoupdate` 会自动提示新版本，winget 需手动发起 PR。
@@ -56,6 +56,14 @@ Scoop 对清单无签名要求，任选一条：
 发布前可交叉验证：
 
 ```powershell
-sha256sum VaultGuard.exe
-# 应与清单中的 InstallerSha256 / hash 一致
+Get-FileHash .\VaultGuard.exe -Algorithm SHA256
+# 输出应与清单中的 InstallerSha256 / hash 一致
 ```
+
+清单自身的一致性（版本、Release URL、SHA-256 字段）可在仓库根目录运行：
+
+```powershell
+.\distrib\verify.ps1
+```
+
+CI 会在 Windows 测试任务中自动运行同一检查，避免发布链接或哈希与清单漂移。

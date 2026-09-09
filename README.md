@@ -46,7 +46,7 @@
 
 | 方式 | 命令 / 步骤 | 状态 |
 | --- | --- | --- |
-| 手动下载（推荐） | 到 [GitHub Releases](https://github.com/AAAduck/VaultGuard/releases) 下载 `VaultGuard.exe`，并下载同目录的 `SHA256SUMS` 执行 `sha256sum -c SHA256SUMS` 校验完整性 | ✅ 可用 |
+| 手动下载（推荐） | 到 [GitHub Releases](https://github.com/AAAduck/VaultGuard/releases) 下载 `VaultGuard.exe`，并下载同目录的 `SHA256SUMS` 校验完整性（PowerShell：`Get-FileHash .\VaultGuard.exe -Algorithm SHA256`） | ✅ 可用 |
 | Scoop | `scoop install vaultguard`（清单在 `distrib/scoop/`，含自动更新） | 🚧 待上架 |
 | winget | `winget install AAAduck.VaultGuard`（清单在 `distrib/winget/`） | 🚧 待代码签名后上架 |
 
@@ -77,7 +77,7 @@
 
 **Q：杀毒软件报毒（如 VHO:Trojan-PSW...）怎么办？**
 这是对**未签名、新编译**程序常见的启发式误报（VHO = 启发式判定，不是已知病毒库命中）。程序源码完全公开、完全离线，无任何联网/上传/键盘记录行为。处理步骤：
-1. **先核验文件未被篡改**：到 GitHub Releases 下载 `SHA256SUMS`，在 exe 同目录执行 `sha256sum -c SHA256SUMS`，一致即文件没被动过手脚；
+1. **先核验文件未被篡改**：到 GitHub Releases 下载 `SHA256SUMS`，在 exe 同目录用 PowerShell 执行 `Get-FileHash .\VaultGuard.exe -Algorithm SHA256` 并比对，一致即文件没被动过手脚；
 2. **提交误报申诉**：到 [opentip.kaspersky.com](https://opentip.kaspersky.com) 上传 exe，选 False Positive，卡巴更新病毒库后全局解除；
 3. **本地加白名单**：杀软排除列表加入 exe（或整个文件夹），应急可先用；
 4. 官方发行件来自 GitHub Actions CI 构建（版本号/公司信息内嵌），每次打 tag 自动生成。
@@ -93,9 +93,11 @@
 如果经常要往里放文件，每次打伪装包会很麻烦。用「隐私保险箱」页（窗口顶部切换）：
 
 1. 输入保存位置和口令，点「新建」——生成一个 `.vgsafe` 文件；
-2. 打开后随时「添加文件 / 添加文件夹 / 移除选中」，每次修改自动重新加密保存；
+2. 打开后随时「添加文件 / 添加文件夹 / 移除选中」，每次修改自动保存；新增内容和索引以追加段写入，不必重写未改内容；
 3. 勾选「添加时按类型归档到子目录」后，添加的文件会自动按扩展名分进 `图片 / 文档 / 压缩包 / 音频 / 视频 / 其他`，文件夹仍放根目录；
-4. 「导出全部 / 导出选中」把文件解密出来；「更换口令」随时换口令。
+4. 「导出全部 / 导出选中」把文件解密出来；「更换口令」随时换口令；需要释放删除内容与历史索引占用的空间时，点「压缩保险箱」。
+
+删除会立刻从保险箱清单中消失，但在下次「压缩保险箱」（或程序自动压缩）前，旧数据段仍在文件中。持有保险箱和口令的人理论上可从旧段恢复它；这是追加式保存换取速度的边界。自动压缩会在垃圾率超过 30% 且保险箱大于 256MB，或累计 32 份 manifest 后运行。
 
 关闭程序时，箱内解密出来的临时数据会自动擦除。
 
@@ -130,7 +132,7 @@ VaultGuard.exe "D:\资料\项目文件夹" --png --password-stdin
 
 ### 构建与源码
 
-源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 30 个自动化测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期、口令更换、选择性还原、条目重命名/移动、目录前缀整理、嵌套导出、DOCX 超长记录拒绝、启动清扫逻辑、口令提醒逻辑）。
+源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 35 个自动化测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱生命周期、选择性还原、目录整理、VGS2 测试向量、追加保存、损坏回退、压缩与 VGS1 升级）。
 
 ### 文件说明
 
@@ -147,7 +149,8 @@ outputs/                # 默认输出目录
 
 ## 版本记录
 
-- **v1.4.1（2026-09，运维/发布）**：依赖审计接入 CI（`cargo audit` 每周自动跑 + Cargo.lock 变更即跑）；winget / scoop 上架清单与提交指引（`distrib/`）；文档站上线（`docs/`，GitHub Pages 单页：场景 / FAQ / 威胁模型 / 格式规范）；README 补安装方式与 FAQ；仓库补 MIT LICENSE（Cargo.toml 同步 license 字段）。
+- **v2.0（开发中）**：隐私保险箱切换到 VGS2 段链格式——打开只认证独立 manifest；新增文件与删除/改名/移动仅追加数据段或索引；末尾写入损坏自动回退上一个已认证 manifest；提供手动与阈值自动压缩回收空间。VGS1 永远可读，界面确认后首次保存升级为 VGS2。删除先从清单隐藏、物理旧段在压缩前保留的边界已写明。
+- **v1.4.1（2026-09，运维/发布）**：依赖审计接入 CI（`cargo audit` 每周自动跑 + Cargo.toml/Cargo.lock 变更即跑）；winget / scoop 上架清单与提交指引（`distrib/`），清单版本/Release URL/SHA-256 一致性校验接入 CI；文档站上线（`docs/`，GitHub Pages 单页：场景 / FAQ / 威胁模型 / 格式规范）；README 补安装方式与 FAQ；仓库补 MIT LICENSE（Cargo.toml 同步 license 字段），CI 测试任务收紧为只读权限。
 - **v1.4（2026-09）**：保险箱「添加时按类型归档」（可选开关）——添加文件自动按扩展名进 `图片 / 文档 / 压缩包 / 音频 / 视频 / 其他` 子目录，文件夹放根目录，同分类重名自动加后缀。同时完成安全审查整改：启动清扫不再误删长时间打开的保险箱/解密预览（活跃标记心跳）；明文临时 tar 改为覆写擦除；文件名保留设备名（CON/NUL/COM1-9 等）自动让位；DOCX 壳拒绝超长记录（防恶意容器崩溃）；嵌套条目导出保留目录层级；分享说明复制含口令文案前增加剪贴板历史确认。
 - **v1.3.3（2026-09）**：修复 CI 产物资源嵌入被静默跳过（根因：`.rc` 路径反斜杠被编译器当转义符）——官方发行 exe 补全图标/清单/版本信息；CI 构建后新增资源校验，缺失即失败；根目录与 Release 产物统一同哈希。
 - **v1.3.2（2026-09）**：修复 CI 上 zig 路径识别（内部构建修复，对用户无感）。

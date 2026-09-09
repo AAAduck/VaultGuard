@@ -1,6 +1,6 @@
 //! 选择性导出：嵌套条目导出后保留目录层级（回归：曾被 safe_name 拍平为 a_b）。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use vaultguard::safe;
 

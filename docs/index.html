@@ -173,7 +173,7 @@
     <tr><td>拿到程序与源码的攻击者</td><td>✅（口令加密）</td><td>Argon2id(64MiB, t=3, p=1) 派生口令密钥，无后门、无找回</td></tr>
     <tr><td>网盘自动扫描/取证分析</td><td>⚠️ 有限</td><td>密文统计特征理论上可被识别；专业取证请用 VeraCrypt</td></tr>
     <tr><td>忘记口令</td><td>❌ 无解</td><td>有意为之：不存在绕过路径</td></tr>
-    <tr><td>已删除数据的介质残留</td><td>⚠️ 有限</td><td>程序内临时数据用后覆写擦除；但文件系统/固态盘层面残留需整体擦除介质才可消除</td></tr>
+    <tr><td>已删除数据的介质残留</td><td>⚠️ 有限</td><td>VGS2 删除会立即隐藏条目，但压缩前旧数据段仍保留；程序临时数据会覆写擦除</td></tr>
   </table>
 
   <h3>设计上的安全措施</h3>
@@ -181,14 +181,14 @@
     <li><strong>认证先行</strong>：AES-256-GCM 认证标记常量时间比较；解密侧先认证、通过后才把明文写入磁盘；</li>
     <li><strong>临时数据擦除</strong>：保险箱会话关闭/程序退出时，解密出的临时明文用覆写方式擦除后删除；</li>
     <li><strong>防跨壳改名</strong>：AAD 绑定格式版本与外壳类型，把加密文件从 PNG 改名成 JPG 会被认证拒绝；</li>
-    <li><strong>容错重写</strong>：保险箱保存采用写临时容器→自校验→原子替换，旧箱留作回滚、成功后擦除；</li>
+    <li><strong>容错保存</strong>：VGS2 先落盘数据段、再落盘 manifest；末尾未完成或认证失败会回退到上一份已认证 manifest。压缩/换口令采用自校验后的原子替换；</li>
     <li><strong>完全离线</strong>：无网络、无遥测、无账号，不引入第三方依赖的上传路径。</li>
   </ul>
 </section>
 
 <section id="format">
   <h2>公开格式规范</h2>
-  <p class="lead">容器格式全部公开、字节级可复现（VGS1 永远可解；VGS2 为规划中的性能格式，规范一并公开）。所有整数均为大端（Big-Endian）。</p>
+  <p class="lead">容器格式全部公开、字节级可复现（VGS1 永远可解；新建保险箱使用 VGS2）。所有整数均为大端（Big-Endian）。</p>
 
   <h3>伪装容器（VG 系列）— 单次加密产物</h3>
   <table>
@@ -204,7 +204,7 @@
     <li><strong>明文路径</strong>：加密侧 tar 流直通加密管道，明文不落盘；解密侧先认证后落位，临时明文用后覆写擦除。</li>
   </ul>
 
-  <h3>隐私保险箱（VGS1，<code>.vgsafe</code>）</h3>
+  <h3>历史保险箱（VGS1，<code>.vgsafe</code>）</h3>
   <table>
     <tr><th>字段</th><th>长度</th><th>内容</th></tr>
     <tr><td>Magic</td><td>4B</td><td><code>"VGS1"</code></td></tr>
@@ -214,18 +214,18 @@
     <tr><td>主体</td><td>变长</td><td>AES-256-GCM(tar 流) + 16B 认证标记；AAD = <code>"VGS1"</code></td></tr>
   </table>
   <ul>
-    <li><strong>打开</strong>：整箱解密到临时工作树，GCM 认证通过才可见；会话关闭/退出时覆写擦除；</li>
-    <li><strong>保存</strong>：整箱重写 —— 写临时容器、自校验、原子替换旧箱（旧箱留作回滚，成功后擦除）；</li>
+    <li><strong>兼容</strong>：VGS1 可正常打开和导出；界面确认后首次保存会升级为 VGS2，旧 VGS1 解密路径永久保留；</li>
     <li><strong>防误删</strong>：启动清扫带活跃标记心跳，不会误删长时间打开的保险箱/解密预览。</li>
   </ul>
 
-  <h3>VGS2（规划中）— 性能路线格式 <span class="pill">尚未接管读写</span></h3>
-  <p>目标：打开只解 manifest、保存按段追加，支撑"1 万文件、5GB 级"资料库的日常管理。格式规范已固化：</p>
+  <h3>VGS2 — 当前保险箱格式 <span class="pill">已接管读写</span></h3>
+  <p>打开只认证 manifest、保存按段追加，面向"1 万文件、5GB 级"资料库的日常管理：</p>
   <ul>
     <li><strong>全局头</strong> 50B：<code>"VGS2"</code>(4) + kid(1) + Argon2id m/t/p + salt(16) + nonce(12) + reserve(8)；</li>
     <li><strong>段链布局</strong>：数据段（<code>0x01</code>）/ manifest 段（<code>0x02</code>）追加式串接；段头 33B = 类型(1) + 序号(8) + 数据长度(8) + nonce(12) + CRC32(4)；</li>
-    <li><strong>防重排/防截断/防拼接</strong>：段序号进 AAD（<code>"VGS2" + 段类型 + 序号(8B)</code>），篡改即认证失败；段头自带 CRC32；</li>
-    <li><strong>manifest</strong>：扁平条目 <code>[name_len(2)][name][is_dir(1)][size(8)][mtime(8)][seg(8)][tar_path_len(2)][tar_path]</code>；名字/路径上限 4096B，条目上限 100 万（防恶意声明超大分配）。</li>
+    <li><strong>防重排/防拼接</strong>：段序号进 AAD（<code>"VGS2" + 用途字节 + 序号(8B)</code>；manifest = <code>0x00</code>、数据 = <code>0x01</code>），篡改即认证失败；段头自带 CRC32。尾部截断按设计回退到上一份已认证 manifest（它保障崩溃恢复，不提供对有能力回滚整个文件者的检测）；</li>
+    <li><strong>manifest</strong>：扁平条目 <code>[name_len(2)][name][is_dir(1)][size(8)][mtime(8)][seg(8)][tar_path_len(2)][tar_path]</code>；名字/路径上限 4096B，条目上限 100 万，读取上限 64MiB（防恶意长度导致超大分配）。</li>
+    <li><strong>追加、回退与压缩</strong>：新增追加数据段和新 manifest；删除/改名/移动只追加 manifest。末尾 manifest 未写完或认证失败时回退到上一版。删除立刻不可见，但物理旧段仅会在「压缩保险箱」或自动压缩（垃圾率 &gt;30% 且 &gt;256MB，或 32 份 manifest）时回收。</li>
   </ul>
 </section>
 
@@ -236,7 +236,7 @@
     <li>到 <a href="https://github.com/AAAduck/VaultGuard/releases" target="_blank" rel="noopener">GitHub Releases</a> 下载 <code>VaultGuard.exe</code> 与 <code>SHA256SUMS</code>；</li>
     <li>把两者放到同一目录，执行校验：</li>
   </ol>
-  <pre><code>sha256sum -c SHA256SUMS   # 输出 "VaultGuard.exe: OK" 即文件未被篡改</code></pre>
+  <pre><code>Get-FileHash .\VaultGuard.exe -Algorithm SHA256   # 将 Hash 与 SHA256SUMS 比对</code></pre>
   <p>官方发行件由 GitHub Actions CI 构建，版本号/公司信息内嵌；每次打 tag 自动生成 Release。</p>
 
   <h3>Scoop</h3>
@@ -250,7 +250,7 @@
 <section id="build">
   <h2>构建与安全审计</h2>
   <ul>
-    <li><strong>测试</strong>：<code>cargo test --release</code> —— 30 个自动化测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱全生命周期、口令更换、选择性还原、条目重命名/移动、目录前缀整理、嵌套导出、DOCX 超长记录拒绝、启动清扫、口令提醒）；</li>
+    <li><strong>测试</strong>：<code>cargo test --release</code> —— 35 个自动化测试，覆盖既有容器与保险箱功能，以及 VGS2 向量、追加索引、损坏回退、压缩和 VGS1 升级；</li>
     <li><strong>依赖审计</strong>：<code>cargo audit</code> 每周定时在 CI 自动运行，Cargo.lock 变更时也会触发；</li>
     <li><strong>可复现构建</strong>：源码公开，任何人可自行构建比对产物哈希。</li>
   </ul>

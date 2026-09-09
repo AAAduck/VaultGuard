@@ -15,6 +15,7 @@ mod paths;
 mod safe;
 mod shells;
 mod tarx;
+mod vgs2;
 
 use std::path::{Path, PathBuf};
 

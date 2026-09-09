@@ -45,29 +45,10 @@ fn append_recursive<W: Write>(b: &mut tar::Builder<W>, abs: &Path, arc: &str) ->
     let md = std::fs::symlink_metadata(abs)?;
     let ft = md.file_type();
     if ft.is_file() {
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::file());
-        header.set_size(md.len());
-        header.set_mode(0o644);
-        if let Ok(t) = md.modified() {
-            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                header.set_mtime(d.as_secs());
-            }
-        }
-        let f = File::open(abs)?;
-        b.append_data(&mut header, arc, f)?;
+        append_one(b, abs, arc, false)?;
         Ok(())
     } else if ft.is_dir() {
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::Directory);
-        header.set_size(0);
-        header.set_mode(0o755);
-        if let Ok(t) = md.modified() {
-            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                header.set_mtime(d.as_secs());
-            }
-        }
-        b.append_data(&mut header, arc, io::empty())?;
+        append_one(b, abs, arc, true)?;
         let rd = std::fs::read_dir(abs)?;
         let mut subs: Vec<PathBuf> = Vec::new();
         for e in rd.flatten() {
@@ -91,6 +72,39 @@ fn append_recursive<W: Write>(b: &mut tar::Builder<W>, abs: &Path, arc: &str) ->
         // symlink / hardlink 等跳过（对应 Python 实现 filter=_no_link）
         Ok(())
     }
+}
+
+/// 将已经展开的文件树条目按指定归档路径写入 tar。
+/// VGS2 保存使用它：只打包本次新增的 staged 条目，避免读取旧数据段。
+pub fn pack_entries_to_writer<W: Write>(items: &[(PathBuf, String, bool)], w: W) -> io::Result<()> {
+    let mut b = tar::Builder::new(w);
+    for (src, arc, is_dir) in items {
+        append_one(&mut b, src, arc, *is_dir)?;
+    }
+    b.finish()?;
+    Ok(())
+}
+
+fn append_one<W: Write>(b: &mut tar::Builder<W>, abs: &Path, arc: &str, is_dir: bool) -> io::Result<()> {
+    let md = std::fs::symlink_metadata(abs)?;
+    if is_dir != md.is_dir() || (!is_dir && !md.is_file()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "暂存条目类型已变化"));
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(if is_dir { tar::EntryType::Directory } else { tar::EntryType::file() });
+    header.set_size(if is_dir { 0 } else { md.len() });
+    header.set_mode(if is_dir { 0o755 } else { 0o644 });
+    if let Ok(t) = md.modified() {
+        if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+            header.set_mtime(d.as_secs());
+        }
+    }
+    if is_dir {
+        b.append_data(&mut header, arc, io::empty())?;
+    } else {
+        b.append_data(&mut header, arc, File::open(abs)?)?;
+    }
+    Ok(())
 }
 
 /// 在 dst 下解包 tar。返回 (顶层组件列表, 条目数)。
@@ -201,6 +215,36 @@ pub fn list_file(tp: &Path) -> io::Result<Vec<(String, u64, bool)>> {
     Ok(out)
 }
 
+/// 从一个已认证的临时 tar 提取指定文件。目标路径由调用者从已认证 manifest
+/// 生成；tar 内未匹配条目一律忽略，避免整段物化。
+pub fn extract_files(tp: &Path, wanted: &[(String, PathBuf)]) -> io::Result<usize> {
+    let mut want = std::collections::BTreeMap::new();
+    for (tar_path, dst) in wanted {
+        want.insert(tar_path.as_str(), dst);
+    }
+    let f = File::open(tp)?;
+    let mut ar = tar::Archive::new(f);
+    let mut n = 0usize;
+    for entry in ar.entries()? {
+        let mut e = entry?;
+        let raw = e.path()?.to_string_lossy().to_string();
+        let name = raw.trim_matches('/').to_string();
+        let Some(dst) = want.get(name.as_str()) else { continue };
+        // 即使匹配，也校验 tar 的原始路径，防止解析器在后续改动时绕过路径边界。
+        let _ = sanitize_rel(&name)?;
+        if !e.header().entry_type().is_file() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = File::create(dst)?;
+        std::io::copy(&mut e, &mut out)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// 跨盘安全移动（rename 失败回退 拷贝+删除）。保险箱导出/落位用。
 pub fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
     force_move(src, dst)
@@ -246,6 +290,49 @@ pub fn place(
     out: &Path,
 ) -> io::Result<(PathBuf, usize)> {
     place_inner(tmp, vault_base, out, None)
+}
+
+/// 把已经按原始相对路径物化的目录落位。与 `place` 保持同一单顶层/多顶层语义，
+/// 供 VGS2 按需解密后的临时树使用。
+pub fn place_tree(tree: &Path, vault_base: &str, out: &Path) -> io::Result<(PathBuf, usize)> {
+    std::fs::create_dir_all(out)?;
+    let mut tops: Vec<PathBuf> = std::fs::read_dir(tree)?.flatten().map(|e| e.path()).collect();
+    tops.sort();
+    if tops.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "没有匹配的条目可落位"));
+    }
+    let total = count_tree_entries(tree);
+    if tops.len() == 1 {
+        let name = tops[0].file_name().unwrap_or_default();
+        let dst = uniq(&out.join(name));
+        force_move(&tops[0], &dst)?;
+        return Ok((dst, total));
+    }
+    let name = format!(
+        "还原_{}",
+        safe_name(&crate::paths::strip_vault_ext(vault_base), 80)
+    );
+    let dst = uniq(&out.join(name));
+    std::fs::create_dir_all(&dst)?;
+    for top in tops {
+        let name = top.file_name().unwrap_or_default().to_owned();
+        force_move(&top, &dst.join(name))?;
+    }
+    Ok((dst, total))
+}
+
+fn count_tree_entries(dir: &Path) -> usize {
+    let mut n = 0usize;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            n += 1;
+            let p = e.path();
+            if p.is_dir() {
+                n += count_tree_entries(&p);
+            }
+        }
+    }
+    n
 }
 
 /// 选择性落位：只把 selected 中列出的顶层条目从 tar 落位到 out。

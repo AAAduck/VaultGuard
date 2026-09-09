@@ -70,6 +70,7 @@ enum VaultTask {
     MoveEntry(String, String),
     ExportAll(String),
     ExportSel(Vec<String>, String),
+    Compact,
     ChangePass(String),
 }
 
@@ -116,6 +117,7 @@ struct VaultPage {
     mv_val: String,
     busy: bool,
     session: Option<safe::Session>,
+    legacy_upgrade_ack: bool,
     sel: HashSet<String>,
     organize: bool, // 添加时按类型归档到子目录
     tx: Sender<VMsg>,
@@ -136,6 +138,7 @@ impl VaultPage {
             mv_val: String::new(),
             busy: false,
             session: None,
+            legacy_upgrade_ack: true,
             sel: HashSet::new(),
             organize: false,
             tx,
@@ -232,6 +235,11 @@ impl VaultApp {
                     self.vp.busy = false;
                     self.progress = None;
                     self.vp.session = sess;
+                    self.vp.legacy_upgrade_ack = !self
+                        .vp
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.is_legacy_v1());
                     match res {
                         Ok(msg) => self.log(&format!("完成：{}", msg)),
                         Err(e) => self.log(&format!("失败：{}", e)),
@@ -520,7 +528,7 @@ impl VaultApp {
             .frame(
                 egui::Frame::default()
                     .fill(PANEL)
-                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
                     .inner_margin(egui::Margin::symmetric(16.0, 9.0)),
             )
             .show(ctx, |ui| {
@@ -529,7 +537,7 @@ impl VaultApp {
                         ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
                     ui.painter().rect_filled(rect, 8.0, ACCENT_DIM);
                     ui.painter()
-                        .rect_stroke(rect, 8.0, egui::Stroke::new(1.0, ACCENT));
+                        .rect_stroke(rect, 8.0, egui::Stroke::new(1.0_f32, ACCENT));
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -946,7 +954,7 @@ impl VaultApp {
                 if self.pass_tip_due {
                     egui::Frame::default()
                         .fill(Color32::from_rgb(0x1D, 0x18, 0x08))
-                        .stroke(egui::Stroke::new(1.0, BUSY_AMBER))
+                        .stroke(egui::Stroke::new(1.0_f32, BUSY_AMBER))
                         .rounding(8.0)
                         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                         .show(ui, |ui| {
@@ -975,7 +983,7 @@ impl VaultApp {
                 egui::Frame::default()
                     .fill(if dragging { ACCENT_DIM } else { CARD })
                     .stroke(egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         if dragging { ACCENT } else { BORDER },
                     ))
                     .rounding(10.0)
@@ -1054,7 +1062,7 @@ impl VaultApp {
                 if let Some(out) = &self.last_output {
                     egui::Frame::default()
                         .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0, ACCENT))
+                        .stroke(egui::Stroke::new(1.0_f32, ACCENT))
                         .rounding(10.0)
                         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                         .show(ui, |ui| {
@@ -1090,7 +1098,7 @@ impl VaultApp {
         };
         egui::Frame::default()
             .fill(CARD)
-            .stroke(egui::Stroke::new(1.0, ACCENT))
+            .stroke(egui::Stroke::new(1.0_f32, ACCENT))
             .rounding(10.0)
             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
             .show(ui, |ui| {
@@ -1301,10 +1309,30 @@ impl VaultApp {
                     return;
                 }
 
+                let legacy_unconfirmed = self
+                    .vp
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.is_legacy_v1() && !self.vp.legacy_upgrade_ack);
+                let can_mutate = !busy && !legacy_unconfirmed;
+                if legacy_unconfirmed {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new("此保险箱为旧 VGS1 格式；第一次保存会升级为 VGS2，旧格式仍可由新版打开。")
+                                .size(10.5)
+                                .color(BUSY_AMBER),
+                        );
+                        if ui.add(ghost_button("确认后允许升级保存")).clicked() {
+                            self.vp.legacy_upgrade_ack = true;
+                        }
+                    });
+                    ui.add_space(5.0);
+                }
+
                 // ── 已打开：操作区 ──
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!busy, egui::Button::new("添加文件").min_size(egui::vec2(0.0, 28.0)))
+                        .add_enabled(can_mutate, egui::Button::new("添加文件").min_size(egui::vec2(0.0, 28.0)))
                         .clicked()
                     {
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
@@ -1316,7 +1344,7 @@ impl VaultApp {
                         }
                     }
                     if ui
-                        .add_enabled(!busy, egui::Button::new("添加文件夹").min_size(egui::vec2(0.0, 28.0)))
+                        .add_enabled(can_mutate, egui::Button::new("添加文件夹").min_size(egui::vec2(0.0, 28.0)))
                         .clicked()
                     {
                         if let Some(d) = rfd::FileDialog::new().pick_folder() {
@@ -1353,7 +1381,7 @@ impl VaultApp {
                         }
                     }
                     if ui
-                        .add_enabled(!busy && !self.vp.sel.is_empty(), egui::Button::new("移除选中").min_size(egui::vec2(0.0, 28.0)))
+                        .add_enabled(can_mutate && !self.vp.sel.is_empty(), egui::Button::new("移除选中").min_size(egui::vec2(0.0, 28.0)))
                         .clicked()
                     {
                         let names: Vec<String> = self.vp.sel.iter().cloned().collect();
@@ -1365,8 +1393,19 @@ impl VaultApp {
                         std::thread::spawn(move || vault_worker(sess, task, tx));
                     }
                     if ui
+                        .add_enabled(can_mutate, ghost_button("压缩保险箱"))
+                        .on_hover_text("回收已删除条目和历史索引占用的空间；期间会重新写入保险箱")
+                        .clicked()
+                    {
+                        let task = VaultTask::Compact;
+                        let sess = self.vp.session.take();
+                        self.vp.busy = true;
+                        let tx = self.vp.tx.clone();
+                        std::thread::spawn(move || vault_worker(sess, task, tx));
+                    }
+                    if ui
                         .add_enabled(
-                            !busy && self.vp.sel.len() == 1,
+                            can_mutate && self.vp.sel.len() == 1,
                             egui::Button::new("重命名").min_size(egui::vec2(0.0, 28.0)),
                         )
                         .clicked()
@@ -1379,7 +1418,7 @@ impl VaultApp {
                     }
                     if ui
                         .add_enabled(
-                            !busy && self.vp.sel.len() == 1,
+                            can_mutate && self.vp.sel.len() == 1,
                             egui::Button::new("移动").min_size(egui::vec2(0.0, 28.0)),
                         )
                         .clicked()
@@ -1391,7 +1430,7 @@ impl VaultApp {
                         }
                     }
                     if ui
-                        .add_enabled(!busy, ghost_button(if self.vp.changing { "取消换口令" } else { "更换口令" }))
+                        .add_enabled(can_mutate, ghost_button(if self.vp.changing { "取消换口令" } else { "更换口令" }))
                         .clicked()
                     {
                         self.vp.changing = !self.vp.changing;
@@ -1434,7 +1473,7 @@ impl VaultApp {
                         );
                         if ui
                             .add_enabled(
-                                !busy
+                                can_mutate
                                     && !self.vp.pass.is_empty()
                                     && self.vp.pass == self.vp.pass2,
                                 primary_button("应用新口令").min_size(egui::vec2(0.0, 26.0)),
@@ -1476,7 +1515,7 @@ impl VaultApp {
                             .unwrap_or_default();
                         if ui
                             .add_enabled(
-                                !busy && !from.is_empty() && !self.vp.ren_val.trim().is_empty(),
+                                can_mutate && !from.is_empty() && !self.vp.ren_val.trim().is_empty(),
                                 primary_button("确定重命名").min_size(egui::vec2(0.0, 26.0)),
                             )
                             .clicked()
@@ -1518,7 +1557,7 @@ impl VaultApp {
                             .cloned()
                             .unwrap_or_default();
                         if ui
-                            .add_enabled(!busy && !name.is_empty(), primary_button("确定移动").min_size(egui::vec2(0.0, 26.0)))
+                            .add_enabled(can_mutate && !name.is_empty(), primary_button("确定移动").min_size(egui::vec2(0.0, 26.0)))
                             .clicked()
                         {
                             let dir = self.vp.mv_val.trim().to_string();
@@ -1551,7 +1590,7 @@ impl VaultApp {
                     .unwrap_or(0);
                 egui::Frame::default()
                     .fill(CARD)
-                    .stroke(egui::Stroke::new(1.0, BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
                     .rounding(10.0)
                     .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                     .show(ui, |ui| {
@@ -1686,7 +1725,7 @@ fn shell_card(
     egui::Frame::default()
         .fill(if active { ACCENT_DIM } else { CARD })
         .stroke(egui::Stroke::new(
-            1.0,
+            1.0_f32,
             if active { ACCENT } else { BORDER },
         ))
         .rounding(8.0)
@@ -1749,7 +1788,7 @@ fn item_row(
         if is_vault {
             egui::Frame::default()
                 .fill(ACCENT_DIM)
-                .stroke(egui::Stroke::new(1.0, ACCENT))
+                .stroke(egui::Stroke::new(1.0_f32, ACCENT))
                 .rounding(4.0)
                 .inner_margin(egui::Margin::symmetric(5.0, 1.0))
                 .show(ui, |chip| {
@@ -1794,7 +1833,7 @@ enum RowAction {
 fn log_card(ui: &mut egui::Ui, busy: bool, progress: Option<u8>, logs: &[String]) {
     egui::Frame::default()
         .fill(CARD)
-        .stroke(egui::Stroke::new(1.0, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, BORDER))
         .rounding(10.0)
         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
         .show(ui, |ui| {
@@ -1858,7 +1897,7 @@ fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
 fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(12.5).color(TEXT))
         .fill(CARD_HOVER)
-        .stroke(egui::Stroke::new(1.0, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, BORDER))
         .rounding(8.0)
         .min_size(egui::vec2(0.0, 32.0))
 }
@@ -1866,7 +1905,7 @@ fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
 fn ghost_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(11.5).color(TEXT_SUB))
         .fill(Color32::TRANSPARENT)
-        .stroke(egui::Stroke::new(1.0, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, BORDER))
         .rounding(7.0)
         .min_size(egui::vec2(0.0, 26.0))
 }
@@ -1903,8 +1942,13 @@ fn vault_worker(
         VaultTask::Open(path, pass) => match safe::open(Path::new(&path), &pass) {
             Ok(s) => {
                 let n = s.entries.len();
+                let legacy = s.is_legacy_v1();
                 sess = Some(s);
-                Ok(format!("保险箱已打开：{}（{} 个条目）", path, n))
+                Ok(if legacy {
+                    format!("保险箱已打开：{}（{} 个条目，旧 VGS1；确认后首次保存将升级 VGS2）", path, n)
+                } else {
+                    format!("保险箱已打开：{}（{} 个条目）", path, n)
+                })
             }
             Err(e) => Err(e.to_string()),
         },
@@ -1917,7 +1961,7 @@ fn vault_worker(
                     s.add_paths(&files)
                 };
                 add.and_then(|added| {
-                    line(format!("已添加 {} 项，正在重新加密保存…", added));
+                    line(format!("已添加 {} 项，正在保存…", added));
                     s.save(&save_prog)
                 })
                 .map(|_| {
@@ -1936,7 +1980,7 @@ fn vault_worker(
                 let n = names.len();
                 s.remove_entries(&names)
                     .and_then(|removed| {
-                        line(format!("已移除 {} 项，正在重新加密保存…", removed));
+                        line(format!("已移除 {} 项，正在保存…", removed));
                         s.save(&save_prog)
                     })
                     .map(|_| format!("已移除 {} 项并保存", n))
@@ -1948,7 +1992,7 @@ fn vault_worker(
             Some(s) => s
                 .rename_entry(&from, &to)
                 .and_then(|_| {
-                    line(format!("已重命名 {} -> {}，正在重新加密保存…", from, to));
+                    line(format!("已重命名 {} -> {}，正在保存…", from, to));
                     s.save(&save_prog)
                 })
                 .map(|_| format!("已重命名 {} -> {}", from, to))
@@ -1964,7 +2008,7 @@ fn vault_worker(
                     } else {
                         dir.clone()
                     };
-                    line(format!("已移动 {} -> {}，正在重新加密保存…", name, dst));
+                    line(format!("已移动 {} -> {}，正在保存…", name, dst));
                     s.save(&save_prog)
                 })
                 .map(|_| {
@@ -1989,6 +2033,13 @@ fn vault_worker(
             Some(s) => s
                 .export_selective(&names, Path::new(&out))
                 .map(|n| format!("已导出 {} 个条目到 {}", n, out))
+                .map_err(|e| e.to_string()),
+            None => Err("保险箱未打开".into()),
+        },
+        VaultTask::Compact => match sess.as_mut() {
+            Some(s) => s
+                .compact(&save_prog)
+                .map(|_| "保险箱已压缩，已回收历史数据段空间".to_string())
                 .map_err(|e| e.to_string()),
             None => Err("保险箱未打开".into()),
         },
@@ -2123,10 +2174,10 @@ fn install_style(ctx: &egui::Context) {
     v.window_fill = CARD;
     v.extreme_bg_color = Color32::from_rgb(0x0D, 0x0D, 0x10);
     v.faint_bg_color = Color32::from_rgb(0x14, 0x14, 0x17);
-    v.window_stroke = egui::Stroke::new(1.0, BORDER);
+    v.window_stroke = egui::Stroke::new(1.0_f32, BORDER);
     v.window_rounding = egui::Rounding::same(10.0);
     v.selection.bg_fill = ACCENT_DIM;
-    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
     v.hyperlink_color = ACCENT_TEXT;
     v.warn_fg_color = BUSY_AMBER;
     v.override_text_color = Some(TEXT);
@@ -2138,12 +2189,12 @@ fn install_style(ctx: &egui::Context) {
     ] {
         w.weak_bg_fill = bg;
         w.bg_fill = bg;
-        w.fg_stroke = egui::Stroke::new(1.0, fg);
-        w.bg_stroke = egui::Stroke::new(1.0, BORDER);
+        w.fg_stroke = egui::Stroke::new(1.0_f32, fg);
+        w.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
         w.rounding = egui::Rounding::same(7.0);
     }
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_SUB);
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_SUB);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
 
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);

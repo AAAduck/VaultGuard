@@ -7,3 +7,4 @@ pub mod paths;
 pub mod safe;
 pub mod shells;
 pub mod tarx;
+pub mod vgs2;

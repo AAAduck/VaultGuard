@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 // 与 src-tauri/build.rs 同一套方案：本机 GNU 工具链没有 windres，资源（图标 + 清单）

@@ -8,7 +8,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['VaultGuard_rs/Cargo.lock']
+    paths:
+      - 'VaultGuard_rs/Cargo.toml'
+      - 'VaultGuard_rs/Cargo.lock'
 
 permissions:
   contents: read
