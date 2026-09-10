@@ -118,8 +118,15 @@ struct VaultPage {
     busy: bool,
     session: Option<safe::Session>,
     legacy_upgrade_ack: bool,
-    sel: HashSet<String>,
+    sel: HashSet<usize>, // sess.entries 下标（P1-8：改名/移动后选中仍跟随）
     organize: bool, // 添加时按类型归档到子目录
+    // P1：列表能力
+    filter: String,        // 名字子串过滤（纯内存，不落盘、不建索引）
+    focus_filter: bool,    // Ctrl+F：下一帧聚焦过滤框
+    tree: bool,            // 目录树视图（否则平铺）
+    sort: SortKey,         // 排序键
+    sort_desc: bool,       // 降序
+    anchor: Option<usize>, // Shift 连选锚点（条目下标）
     // P0：分层与反馈（状态条/就地确认）
     stage: String,          // 底部状态栏的阶段名
     confirm_remove: bool,   // 「移除」就地确认条
@@ -145,6 +152,12 @@ impl VaultPage {
             legacy_upgrade_ack: true,
             sel: HashSet::new(),
             organize: false,
+            filter: String::new(),
+            focus_filter: false,
+            tree: false,
+            sort: SortKey::Name,
+            sort_desc: false,
+            anchor: None,
             stage: String::new(),
             confirm_remove: false,
             confirm_compact: false,
@@ -153,9 +166,40 @@ impl VaultPage {
         }
     }
 
-    /// 当前选中条目的名字（选中集以名字为键；导出/移除/重命名共用这一处转换）。
+    /// 当前选中条目的名字（选中集是 sess.entries 的下标；导出/移除/重命名共用这一处转换）。
     fn sel_names(&self) -> Vec<String> {
-        self.sel.iter().cloned().collect()
+        let Some(sess) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        self.sel
+            .iter()
+            .filter_map(|&i| sess.entries.get(i).map(|e| e.name.clone()))
+            .collect()
+    }
+
+    /// 过滤 + 排序后的可见条目下标（P1-1/4：纯内存，不落盘、不建索引）。
+    fn visible_indices(&self) -> Vec<usize> {
+        let Some(sess) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        let e = &sess.entries;
+        let pat = self.filter.trim().to_lowercase();
+        let mut v: Vec<usize> = (0..e.len())
+            .filter(|&i| pat.is_empty() || e[i].name.to_lowercase().contains(&pat))
+            .collect();
+        match self.sort {
+            SortKey::Name => v.sort_by(|&a, &b| e[a].name.cmp(&e[b].name)),
+            SortKey::Size => {
+                v.sort_by(|&a, &b| e[a].size.cmp(&e[b].size).then(e[a].name.cmp(&e[b].name)))
+            }
+            SortKey::Kind => {
+                v.sort_by(|&a, &b| kind_key(&e[a]).cmp(&kind_key(&e[b])).then(e[a].name.cmp(&e[b].name)))
+            }
+        }
+        if self.sort_desc {
+            v.reverse();
+        }
+        v
     }
 }
 
@@ -1333,6 +1377,7 @@ impl VaultApp {
                             {
                                 self.vp.session = None;
                                 self.vp.sel.clear();
+                                self.vp.anchor = None;
                                 self.log("保险箱已锁定，临时数据已擦除。");
                             }
                         });
@@ -1463,6 +1508,7 @@ impl VaultApp {
                             let to = self.vp.ren_val.trim().to_string();
                             self.vp.renaming = false;
                             self.vp.sel.clear();
+                            self.vp.anchor = None;
                             self.start_vault(VaultTask::Rename(from.clone(), to), "重命名");
                         }
                         if ui.add(b_ghost("取消")).clicked() {
@@ -1515,6 +1561,7 @@ impl VaultApp {
                             let dir = self.vp.mv_val.trim().to_string();
                             self.vp.moving = false;
                             self.vp.sel.clear();
+                            self.vp.anchor = None;
                             self.start_vault(VaultTask::MoveEntry(name.clone(), dir), "移动条目");
                         }
                         if ui.add(b_ghost("取消")).clicked() {
@@ -1585,7 +1632,88 @@ impl VaultApp {
         }
     }
 
+    /// 键盘可达（P1-6）：常用动作不依赖鼠标。
+    /// 输入框有焦点时不抢键；浮层窗口打开时 Esc 只关窗口。
+    fn vault_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let ctrl = ctx.input(|i| i.modifiers.command);
+        let open = self.vp.session.is_some();
+        if !open {
+            if !ctrl || self.vp.busy {
+                return;
+            }
+            let (new, opn) = ctx.input(|i| (i.key_pressed(egui::Key::N), i.key_pressed(egui::Key::O)));
+            let ready = !self.vp.path.trim().is_empty() && !self.vp.pass.is_empty();
+            if new && ready && self.vp.pass == self.vp.pass2 {
+                let path = self.vp.path.trim().to_string();
+                let pass = self.vp.pass.clone();
+                self.start_vault(VaultTask::Create(path, pass), "创建容器");
+            } else if opn && ready {
+                let path = self.vp.path.trim().to_string();
+                let pass = self.vp.pass.clone();
+                self.start_vault(VaultTask::Open(path, pass), "打开并认证");
+            }
+            return;
+        }
+        if self.vp.renaming || self.vp.moving || self.vp.changing {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.vp.renaming = false;
+                self.vp.moving = false;
+                self.vp.changing = false;
+            }
+            return;
+        }
+        if self.vp.busy {
+            return;
+        }
+        let (all, del, f2, enter, esc, find) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::Delete),
+                i.key_pressed(egui::Key::F2),
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+                i.modifiers.command && i.key_pressed(egui::Key::F),
+            )
+        });
+        if find {
+            self.vp.focus_filter = true;
+        } else if all {
+            for i in self.vp.visible_indices() {
+                self.vp.sel.insert(i);
+            }
+        } else if esc {
+            if self.vp.filter.is_empty() {
+                self.vp.sel.clear();
+                self.vp.anchor = None;
+            } else {
+                self.vp.filter.clear();
+            }
+        } else if del {
+            if !self.vp.sel.is_empty() {
+                self.vp.confirm_compact = false;
+                self.vp.confirm_remove = true;
+            }
+        } else if f2 {
+            if self.vp.sel.len() == 1 {
+                self.vp.ren_val = self.vp.sel_names().into_iter().next().unwrap_or_default();
+                self.vp.renaming = true;
+            }
+        } else if enter {
+            let names = self.vp.sel_names();
+            if !names.is_empty() {
+                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                    let dir = d.display().to_string();
+                    self.start_vault(VaultTask::ExportSel(names, dir), "导出选中");
+                }
+            }
+        }
+    }
+
     fn ui_vault(&mut self, ctx: &egui::Context) {
+        self.vault_shortcuts(ctx);
         self.ui_vault_bar(ctx);
         self.ui_vault_statusbar(ctx);
         egui::CentralPanel::default()
@@ -1627,6 +1755,9 @@ impl VaultApp {
                         });
                     ui.add_space(6.0);
                 }
+
+                // 列表交互动作（P1）：在渲染闭包外统一应用，避免与 session 的不可变借用冲突。
+                let mut pending: Option<ListAction> = None;
 
                 // 忙时整页禁用（P0-2：状态决定可见操作），只在底部状态栏保留进度。
                 let _ = ui.add_enabled_ui(!busy, |ui| {
@@ -1755,6 +1886,7 @@ impl VaultApp {
                                         ui.close_menu();
                                         self.vp.session = None;
                                         self.vp.sel.clear();
+                                        self.vp.anchor = None;
                                         self.log("保险箱已关闭，临时数据已擦除。");
                                     }
                                 },
@@ -1789,6 +1921,7 @@ impl VaultApp {
                                         let names = self.vp.sel_names();
                                         self.vp.confirm_remove = false;
                                         self.vp.sel.clear();
+                                        self.vp.anchor = None;
                                         self.start_vault(VaultTask::Remove(names), "移除条目");
                                     }
                                     if ui.add(b_ghost("取消")).clicked() {
@@ -1830,8 +1963,46 @@ impl VaultApp {
                         ui.add_space(6.0);
                     }
 
-                    // ── 条目列表卡片 ──
-                    let count = self
+                    // ── 过滤 / 视图 / 排序（P1-1/2/4）──
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let f = ui.add(
+                            egui::TextEdit::singleline(&mut self.vp.filter)
+                                .desired_width(170.0)
+                                .hint_text("按名字过滤（Ctrl+F）"),
+                        );
+                        if self.vp.focus_filter {
+                            f.request_focus();
+                            self.vp.focus_filter = false;
+                        }
+                        if !self.vp.filter.is_empty() && ui.add(b_ghost("清除")).clicked() {
+                            self.vp.filter.clear();
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut self.vp.tree, "目录树");
+                        ui.separator();
+                        egui::ComboBox::from_id_source("vault_sort")
+                            .selected_text(match self.vp.sort {
+                                SortKey::Name => "按名字",
+                                SortKey::Size => "按大小",
+                                SortKey::Kind => "按类型",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.vp.sort, SortKey::Name, "按名字");
+                                ui.selectable_value(&mut self.vp.sort, SortKey::Size, "按大小");
+                                ui.selectable_value(&mut self.vp.sort, SortKey::Kind, "按类型");
+                            });
+                        if ui
+                            .add(b_ghost(if self.vp.sort_desc { "降序 ↓" } else { "升序 ↑" }))
+                            .clicked()
+                        {
+                            self.vp.sort_desc = !self.vp.sort_desc;
+                        }
+                    });
+                    ui.add_space(4.0);
+
+                    let visible = self.vp.visible_indices();
+                    let total = self
                         .vp
                         .session
                         .as_ref()
@@ -1846,85 +2017,127 @@ impl VaultApp {
                             ui.horizontal(|ui| {
                                 ui.add_space(4.0);
                                 ui.label(
-                                    egui::RichText::new(format!("保险箱内容（{} 个条目）", count))
-                                        .size(11.5)
-                                        .color(TEXT_MUTED),
+                                    egui::RichText::new(if visible.len() == total {
+                                        format!("保险箱内容（{} 个条目）", total)
+                                    } else {
+                                        format!(
+                                            "保险箱内容（{} / {} 个条目）",
+                                            visible.len(),
+                                            total
+                                        )
+                                    })
+                                    .size(11.5)
+                                    .color(TEXT_MUTED),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.label(
-                                            egui::RichText::new(if self.vp.sel.is_empty() {
-                                                "勾选后可导出或移除".to_string()
-                                            } else {
-                                                format!("已选 {} 项", self.vp.sel.len())
-                                            })
+                                            egui::RichText::new(format!(
+                                                "已选 {}",
+                                                self.vp.sel.len()
+                                            ))
                                             .size(10.5)
                                             .color(TEXT_FAINT),
                                         );
+                                        if ui.add(b_ghost("清空选择")).clicked() {
+                                            self.vp.sel.clear();
+                                            self.vp.anchor = None;
+                                        }
+                                        if ui.add(b_ghost("反选")).clicked() {
+                                            for &i in &visible {
+                                                if !self.vp.sel.remove(&i) {
+                                                    self.vp.sel.insert(i);
+                                                }
+                                            }
+                                        }
+                                        if ui.add(b_ghost("全选")).clicked() {
+                                            for &i in &visible {
+                                                self.vp.sel.insert(i);
+                                            }
+                                        }
                                     },
                                 );
                             });
                             ui.add_space(2.0);
+                            let Some(sess) = self.vp.session.as_ref() else {
+                                return;
+                            };
+                            let entries: &[safe::Entry] = &sess.entries;
+                            if entries.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(14.0);
+                                    ui.label(
+                                        egui::RichText::new("保险箱是空的：点上方「添加 ▾」放入文件或文件夹")
+                                            .size(12.0)
+                                            .color(TEXT_SUB),
+                                    );
+                                    ui.add_space(10.0);
+                                });
+                                return;
+                            }
+                            if visible.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(14.0);
+                                    ui.label(
+                                        egui::RichText::new("没有匹配的条目：清空过滤条件可看全部")
+                                            .size(12.0)
+                                            .color(TEXT_SUB),
+                                    );
+                                    ui.add_space(10.0);
+                                });
+                                return;
+                            }
+                            let tree = self.vp.tree.then(|| build_tree(entries, &visible));
+                            let sel = &mut self.vp.sel;
+                            let anchor = &mut self.vp.anchor;
                             egui::ScrollArea::vertical()
                                 .id_source("safe_items")
                                 .max_height(ui.available_height() * 0.46)
                                 .show(ui, |ui| {
-                                    let Some(sess) = self.vp.session.as_ref() else {
-                                        return;
+                                    let mut cx = RowCtx {
+                                        sel,
+                                        anchor,
+                                        visible: &visible,
+                                        pending: &mut pending,
                                     };
-                                    if sess.entries.is_empty() {
-                                        ui.vertical_centered(|ui| {
-                                            ui.add_space(14.0);
-                                            ui.label(
-                                                egui::RichText::new("保险箱是空的：点上方「添加 ▾」放入文件或文件夹")
-                                                    .size(12.0)
-                                                    .color(TEXT_SUB),
-                                            );
-                                            ui.add_space(10.0);
-                                        });
-                                        return;
-                                    }
-                                    for e in &sess.entries {
-                                        let selected = self.vp.sel.contains(&e.name);
-                                        let dot = if e.is_dir { DIR_SKY } else { TEXT_MUTED };
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(4.0);
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(7.0, 7.0),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(rect, 2.0, dot);
-                                            let resp = ui.selectable_label(
-                                                selected,
-                                                egui::RichText::new(&e.name)
-                                                    .monospace()
-                                                    .size(11.5)
-                                                    .color(if e.is_dir { TEXT_SUB } else { TEXT }),
-                                            );
-                                            if resp.clicked() {
-                                                if selected {
-                                                    self.vp.sel.remove(&e.name);
-                                                } else {
-                                                    self.vp.sel.insert(e.name.clone());
-                                                }
+                                    match &tree {
+                                        Some(t) => draw_tree(ui, &mut cx, entries, t, "", 0),
+                                        None => {
+                                            for &idx in &visible {
+                                                draw_row(ui, &mut cx, entries, idx, 0.0);
                                             }
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |r| {
-                                                    r.label(
-                                                        egui::RichText::new(paths::sz(e.size))
-                                                            .monospace()
-                                                            .size(10.0)
-                                                            .color(TEXT_FAINT),
-                                                    );
-                                                },
-                                            );
-                                        });
+                                        }
                                     }
                                 });
                         });
                 });
+
+                // 列表交互动作的落地：导出（双击 / 右键）/ 重命名 / 移动 / 移除确认。
+                if let Some(act) = pending.take() {
+                    match act {
+                        ListAction::ExportOne(name) => {
+                            if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                self.start_vault(
+                                    VaultTask::ExportSel(vec![name], d.display().to_string()),
+                                    "导出条目",
+                                );
+                            }
+                        }
+                        ListAction::RenameOne(name) => {
+                            self.vp.ren_val = name;
+                            self.vp.renaming = true;
+                        }
+                        ListAction::MoveOne => {
+                            self.vp.mv_val.clear();
+                            self.vp.moving = true;
+                        }
+                        ListAction::AskRemove => {
+                            self.vp.confirm_compact = false;
+                            self.vp.confirm_remove = true;
+                        }
+                    }
+                }
 
                 ui.add_space(10.0);
                 log_panel(ui, &self.logs);
@@ -1932,6 +2145,239 @@ impl VaultApp {
         self.ui_vault_editors(ctx);
     }
 }
+
+/// 排序键（P1-4 排序切换）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Name,
+    Size,
+    Kind,
+}
+
+/// 类型分组键：目录最前（0），其余按扩展名分组（1, ext）。
+fn kind_key(e: &safe::Entry) -> (u8, &str) {
+    if e.is_dir {
+        (0, "")
+    } else {
+        (
+            1,
+            match e.name.rsplit_once('.') {
+                Some((_, ext)) => ext,
+                None => "",
+            },
+        )
+    }
+}
+
+/// 列表交互动作：在渲染闭包之外统一应用，避免与 session 的不可变借用冲突（P1-5/7）。
+enum ListAction {
+    ExportOne(String),
+    RenameOne(String),
+    MoveOne,
+    AskRemove,
+}
+
+/// 行渲染的共享可变状态（P1-3：Shift 连选 / Ctrl 追加 / 全选反选）。
+struct RowCtx<'a> {
+    sel: &'a mut HashSet<usize>,
+    anchor: &'a mut Option<usize>,
+    visible: &'a [usize],
+    pending: &'a mut Option<ListAction>,
+}
+
+/// 单行：整行可点（单击选中、Ctrl 追加、Shift 连选）、双击导出该项、右键出菜单。
+/// 自绘而不用 SelectableLabel，是为了让整行成为同一个交互目标（含右键与双击）。
+fn draw_row(
+    ui: &mut egui::Ui,
+    cx: &mut RowCtx<'_>,
+    entries: &[safe::Entry],
+    idx: usize,
+    indent: f32,
+) {
+    let e = &entries[idx];
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 22.0),
+        egui::Sense::click(),
+    );
+    let selected = cx.sel.contains(&idx);
+    if selected {
+        ui.painter().rect_filled(rect, 5.0, ACCENT_DIM);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, CARD_HOVER);
+    }
+    let dot_x = rect.left() + 8.0 + indent;
+    let dot = egui::Rect::from_center_size(
+        egui::pos2(dot_x + 3.5, rect.center().y),
+        egui::vec2(7.0, 7.0),
+    );
+    ui.painter()
+        .rect_filled(dot, 2.0, if e.is_dir { DIR_SKY } else { TEXT_MUTED });
+
+    let name_left = dot_x + 14.0;
+    let size_right = rect.right() - 10.0;
+    ui.painter()
+        .with_clip_rect(egui::Rect::from_min_max(
+            egui::pos2(name_left, rect.top()),
+            egui::pos2((size_right - 54.0).max(name_left + 20.0), rect.bottom()),
+        ))
+        .text(
+            egui::pos2(name_left, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &e.name,
+            egui::FontId::monospace(11.5),
+            if e.is_dir { TEXT_SUB } else { TEXT },
+        );
+    ui.painter().text(
+        egui::pos2(size_right, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        if e.is_dir {
+            "-".to_string()
+        } else {
+            paths::sz(e.size)
+        },
+        egui::FontId::monospace(10.0),
+        TEXT_FAINT,
+    );
+
+    if resp.clicked() {
+        let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        if shift {
+            let a = cx.anchor.and_then(|x| cx.visible.iter().position(|&v| v == x));
+            let b = cx.visible.iter().position(|&v| v == idx);
+            if let (Some(a), Some(b)) = (a, b) {
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                for k in lo..=hi {
+                    if let Some(&v) = cx.visible.get(k) {
+                        cx.sel.insert(v);
+                    }
+                }
+            } else {
+                cx.sel.insert(idx);
+            }
+            *cx.anchor = Some(idx);
+        } else if cmd {
+            if !cx.sel.remove(&idx) {
+                cx.sel.insert(idx);
+            }
+            *cx.anchor = Some(idx);
+        } else {
+            cx.sel.clear();
+            cx.sel.insert(idx);
+            *cx.anchor = Some(idx);
+        }
+    }
+    if resp.double_clicked() {
+        *cx.pending = Some(ListAction::ExportOne(e.name.clone()));
+    }
+    resp.context_menu(|ui| {
+        ui.set_min_width(150.0);
+        if ui.button("导出该项…").clicked() {
+            *cx.pending = Some(ListAction::ExportOne(e.name.clone()));
+            ui.close_menu();
+        }
+        if ui.button("重命名…").clicked() {
+            cx.sel.clear();
+            cx.sel.insert(idx);
+            *cx.anchor = Some(idx);
+            *cx.pending = Some(ListAction::RenameOne(e.name.clone()));
+            ui.close_menu();
+        }
+        if ui.button("移动到…").clicked() {
+            cx.sel.clear();
+            cx.sel.insert(idx);
+            *cx.pending = Some(ListAction::MoveOne);
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("移除该项").clicked() {
+            cx.sel.clear();
+            cx.sel.insert(idx);
+            *cx.pending = Some(ListAction::AskRemove);
+            ui.close_menu();
+        }
+        if ui.button("复制内部路径").clicked() {
+            ui.output_mut(|o| o.copied_text = e.name.clone());
+            ui.close_menu();
+        }
+    });
+}
+
+/// 目录树节点（P1-2 按 `/` 分层）。
+#[derive(Default)]
+struct DirNode {
+    own: Vec<usize>,
+    files: Vec<usize>,
+    children: std::collections::BTreeMap<String, DirNode>,
+}
+
+impl DirNode {
+    fn count(&self) -> usize {
+        self.own.len() + self.files.len() + self.children.values().map(|c| c.count()).sum::<usize>()
+    }
+}
+
+/// 由「可见条目下标」构建目录树（不建持久索引，每次从名字现算）。
+fn build_tree(entries: &[safe::Entry], visible: &[usize]) -> DirNode {
+    let mut root = DirNode::default();
+    for &i in visible {
+        let e = &entries[i];
+        let parts: Vec<&str> = e.name.split('/').filter(|x| !x.is_empty()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let mut node = &mut root;
+        for seg in &parts[..parts.len() - 1] {
+            node = node.children.entry((*seg).to_string()).or_default();
+        }
+        let last = parts[parts.len() - 1];
+        if e.is_dir {
+            let child = node.children.entry(last.to_string()).or_default();
+            child.own.push(i);
+        } else {
+            node.files.push(i);
+        }
+    }
+    root
+}
+
+/// 递归渲染目录树（id 用完整内部路径，避免同名子目录的折叠状态互相串台）。
+fn draw_tree(
+    ui: &mut egui::Ui,
+    cx: &mut RowCtx<'_>,
+    entries: &[safe::Entry],
+    node: &DirNode,
+    prefix: &str,
+    depth: usize,
+) {
+    let indent = 8.0 + (depth as f32 + 1.0) * 12.0;
+    for (seg, child) in &node.children {
+        let path = if prefix.is_empty() {
+            seg.clone()
+        } else {
+            format!("{}/{}", prefix, seg)
+        };
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("{}（{}）", seg, child.count()))
+                .size(11.5)
+                .color(TEXT_SUB),
+        )
+        .id_source(format!("tree:{}", path))
+        .default_open(true)
+        .show(ui, |ui| {
+            for &i in &child.own {
+                draw_row(ui, cx, entries, i, indent + 12.0);
+            }
+            for &i in &child.files {
+                draw_row(ui, cx, entries, i, indent + 12.0);
+            }
+            draw_tree(ui, cx, entries, child, &path, depth + 1);
+        });
+    }
+    for &i in &node.files {
+        draw_row(ui, cx, entries, i, indent);
+    }
+}
+
 
 fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(11.0).strong().color(TEXT_MUTED));
