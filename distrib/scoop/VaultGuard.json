@@ -1,10 +1,10 @@
 {
-    "version": "1.4.0",
+    "version": "2.1.0",
     "description": "VaultGuard - 网盘伪装加密保险箱：把私密文件加密成普通图片或 Word 文档，离线单文件",
     "homepage": "https://github.com/AAAduck/VaultGuard",
     "license": "MIT",
-    "url": "https://github.com/AAAduck/VaultGuard/releases/download/v1.4.0/VaultGuard.exe",
-    "hash": "8f0d0b360e749c1fc2019e94166afa7edb6e11dd77195d9bfa393faa50b71037",
+    "url": "https://github.com/AAAduck/VaultGuard/releases/download/v2.1.0/VaultGuard.exe",
+    "hash": "3ebd78cd193d426c20ed9bfa12460547216254df3b545453d12a4fc51ec06d1e",
     "bin": "VaultGuard.exe",
     "checkver": {
         "github": "https://github.com/AAAduck/VaultGuard"

@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: AAAduck.VaultGuard
+PackageVersion: 2.1.0
+PackageLocale: zh-CN
+Publisher: AAAduck
+PublisherUrl: https://github.com/AAAduck
+PackageName: VaultGuard
+PackageUrl: https://github.com/AAAduck/VaultGuard
+License: MIT
+LicenseUrl: https://github.com/AAAduck/VaultGuard/blob/main/LICENSE
+ShortDescription: 把私密文件加密成普通图片或 Word 文档的离线单文件保险箱
+Description: VaultGuard 把你的私密文件用 AES-256-GCM 加密后，伪装成一张普通 PNG 图片、JPG 图片或 Word 文档，存网盘、发给别人都不会引起注意。还原需要口令（Argon2id 派生）。完全离线：无账号、无上传、无遥测，只有一个便携单文件 exe。
+Moniker: vaultguard
+Tags:
+- 加密
+- 隐私
+- 保险箱
+- 伪装
+- 离线
+- 安全
+ReleaseNotesUrl: https://github.com/AAAduck/VaultGuard/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

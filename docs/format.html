@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VaultGuard 格式规范 — 字节级容器布局</title>
+<meta name="description" content="VaultGuard 容器格式的字节级规范：VG 系列伪装容器、VGS1 历史保险箱、VGS2 段链保险箱（全局头 / 段头 / AAD / manifest / 崩溃回退语义）。">
+<style>
+  :root{
+    --ink:#1f2937; --sub:#6b7280; --line:#e5e7eb;
+    --accent:#0f766e; --accent-soft:#ccfbf1;
+    --warn-bg:#fff7ed; --warn-line:#fdba74; --warn-ink:#9a3412;
+    --code-bg:#f3f4f6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+       color:var(--ink);line-height:1.7;background:#fff}
+  header.hero{background:#0f766e;color:#fff;padding:34px 20px 30px;text-align:center}
+  header.hero h1{margin:0 0 8px;font-size:28px;letter-spacing:1px}
+  header.hero p{margin:0 auto;max-width:680px;font-size:15px;opacity:.92}
+  header.hero .tag{display:inline-block;margin-top:14px;padding:4px 14px;border:1px solid rgba(255,255,255,.45);
+                   border-radius:999px;font-size:13px;opacity:.95}
+  nav{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--line);z-index:10}
+  nav .wrap{max-width:860px;margin:0 auto;display:flex;flex-wrap:wrap;gap:2px;padding:0 16px}
+  nav a{display:inline-block;padding:10px 12px;font-size:14px;color:var(--sub);text-decoration:none}
+  nav a:hover{color:var(--accent)}
+  main{max-width:860px;margin:0 auto;padding:8px 20px 60px}
+  section{margin-top:44px}
+  h2{font-size:22px;border-left:4px solid var(--accent);padding-left:10px;margin-bottom:8px}
+  h3{font-size:16px;margin:22px 0 6px}
+  h4{font-size:14px;margin:16px 0 4px;color:var(--accent)}
+  .lead{color:var(--sub);font-size:15px;margin-top:4px}
+  .warn{border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:10px;
+        padding:14px 16px;color:var(--warn-ink);font-size:14px;margin-top:14px}
+  .warn b{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin:12px 0}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f9fafb;white-space:nowrap}
+  code{background:var(--code-bg);border-radius:4px;padding:1px 6px;font-family:Consolas,"Courier New",monospace;font-size:13px}
+  pre{background:#111827;color:#e5e7eb;border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;color:inherit;padding:0}
+  ol,ul{padding-left:22px;font-size:15px}
+  li{margin:4px 0}
+  footer{border-top:1px solid var(--line);margin-top:60px;padding:20px;text-align:center;
+         color:var(--sub);font-size:13px}
+  footer a{color:var(--accent);text-decoration:none}
+  .pill{display:inline-block;background:var(--accent-soft);color:var(--accent);border-radius:999px;
+        padding:2px 10px;font-size:12px;margin-left:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <h1>VaultGuard 格式规范</h1>
+  <p>容器格式的字节级说明。全部格式公开，任何人可据此独立实现解码器，也可自行构建程序比对产物哈希。</p>
+  <span class="tag">规范版本 1.0 · 对应程序 v2.1.0</span>
+</header>
+
+<nav>
+  <div class="wrap">
+    <a href="index.html">← 返回首页</a>
+    <a href="#general">总则</a>
+    <a href="#vg">VG 系列</a>
+    <a href="#vgs1">VGS1</a>
+    <a href="#vgs2">VGS2</a>
+    <a href="#limits">常量与上限</a>
+    <a href="#compat">兼容承诺</a>
+  </div>
+</nav>
+
+<main>
+
+<section id="general">
+  <h2>总则</h2>
+  <ul>
+    <li><strong>字节序</strong>：所有多字节整数一律<strong>大端（Big-Endian）</strong>，无对齐填充。</li>
+    <li><strong>加密原语</strong>：AES-256-GCM，认证标记（tag）16 字节，常量时间比较；GHASH 使用 RustCrypto <code>ghash</code>。</li>
+    <li><strong>口令派生</strong>：Argon2id（<code>m=64MiB, t=3, p=1</code>），随机 16 字节盐。参数写入文件头，未来调整不影响旧文件解密。</li>
+    <li><strong>三类格式</strong>：单次加密产物（<code>VG</code> 系列，伪装成图片/文档）、历史保险箱（<code>VGS1</code>）、当前保险箱（<code>VGS2</code>，段链）。</li>
+    <li><strong>明文处理</strong>：加密侧 tar 流直通加密管道，明文不落盘；解密侧先认证后落位，临时明文用后覆写擦除。</li>
+  </ul>
+</section>
+
+<section id="vg">
+  <h2>VG 系列 —— 单次加密产物</h2>
+  <p class="lead">一次加密一个文件或文件夹，产出单个自包含文件（伪装的 PNG / JPG / DOCX，或裸 <code>.vaultguard</code>）。</p>
+  <table>
+    <tr><th>魔数</th><th>用途</th><th>密钥派生</th></tr>
+    <tr><td><code>VG\x03</code></td><td>口令加密（推荐）</td><td>Argon2id：<code>m=64MiB, t=3, p=1</code> + 随机 16B 盐，盐与参数写入头部</td></tr>
+    <tr><td><code>VG\x02</code></td><td>内置密钥（无口令）</td><td>内置主密钥 + HKDF-SHA256；仅防随手翻看，不提供真实保密性</td></tr>
+    <tr><td><code>VG\x01</code></td><td>旧版产物</td><td>仅解密兼容；PBKDF2，600,000 次迭代</td></tr>
+  </table>
+  <h4>外壳载体</h4>
+  <table>
+    <tr><th>外壳</th><th>数据藏匿位置</th></tr>
+    <tr><td>PNG</td><td>私有块 <code>vGDT</code></td></tr>
+    <tr><td>JPG</td><td>APP15 段</td></tr>
+    <tr><td>DOCX</td><td><code>word/vaultData.bin</code>（并拒绝超长记录，防恶意容器崩溃）</td></tr>
+  </table>
+  <ul>
+    <li>外层带正常封面图，数据藏在容器结构中，文件可正常被图片/文档查看器打开。</li>
+    <li><strong>AAD</strong> 绑定格式版本与外壳类型 → 跨外壳改名会被拒绝。</li>
+  </ul>
+</section>
+
+<section id="vgs1">
+  <h2>历史保险箱（VGS1，<code>.vgsafe</code>）</h2>
+  <p class="lead">单段式：整箱作为一个 tar 流加密，任何修改都需要全量重写。</p>
+  <table>
+    <tr><th>偏移</th><th>字段</th><th>长度</th><th>内容</th></tr>
+    <tr><td>0</td><td>Magic</td><td>4B</td><td><code>"VGS1"</code></td></tr>
+    <tr><td>4</td><td>kid</td><td>1B</td><td>密钥派生类型</td></tr>
+    <tr><td>5</td><td>m / t / p</td><td>4+4+1B</td><td>Argon2id 参数（<code>m=64MiB, t=3, p=1</code>）</td></tr>
+    <tr><td>14</td><td>salt</td><td>16B</td><td>随机盐</td></tr>
+    <tr><td>30</td><td>nonce</td><td>12B</td><td>GCM nonce</td></tr>
+    <tr><td>42</td><td>主体</td><td>变长</td><td>AES-256-GCM(tar 流) + 16B 认证标记；AAD = <code>"VGS1"</code></td></tr>
+  </table>
+  <div class="warn">
+    <b>永久可解承诺</b>
+    VGS1 读取路径永久保留。界面确认后，首次保存会把保险箱升级为 VGS2；升级失败保留原箱，不会破坏旧文件。
+  </div>
+</section>
+
+<section id="vgs2">
+  <h2>VGS2 — 当前保险箱格式 <span class="pill">已接管读写</span></h2>
+  <p class="lead">段链式：全局头 + 追加式相接的段。打开只认证 manifest，日常增删只追加段，面向"1 万文件、5GiB 级"资料库。</p>
+
+  <h3>文件整体布局</h3>
+  <pre><code>[全局头 50B][段 1][段 2][段 3][...]</code></pre>
+  <pre><code>段 = [段头 33B][密文 len B][认证标记 16B]</code></pre>
+
+  <h3>全局头（50 B）</h3>
+  <table>
+    <tr><th>偏移</th><th>长度</th><th>字段</th><th>说明</th></tr>
+    <tr><td>0</td><td>4</td><td><code>MAGIC</code></td><td><code>"VGS2"</code></td></tr>
+    <tr><td>4</td><td>1</td><td><code>kid</code></td><td>密钥派生类型（<code>0x01</code> = Argon2id）</td></tr>
+    <tr><td>5</td><td>4</td><td><code>m</code></td><td>Argon2id 内存参数（KiB），当前 65536</td></tr>
+    <tr><td>9</td><td>4</td><td><code>t</code></td><td>Argon2id 迭代次数，当前 3</td></tr>
+    <tr><td>13</td><td>1</td><td><code>p</code></td><td>Argon2id 并行度，当前 1</td></tr>
+    <tr><td>14</td><td>16</td><td><code>salt</code></td><td>随机盐</td></tr>
+    <tr><td>30</td><td>12</td><td><code>nonce</code></td><td>GCM nonce（派生密钥时使用）</td></tr>
+    <tr><td>42</td><td>8</td><td><code>reserve</code></td><td>保留，当前全 0</td></tr>
+  </table>
+
+  <h3>段头（33 B）</h3>
+  <table>
+    <tr><th>偏移</th><th>长度</th><th>字段</th><th>说明</th></tr>
+    <tr><td>0</td><td>1</td><td><code>type</code></td><td>段类型：<code>0x01</code> = 数据段，<code>0x02</code> = manifest 段</td></tr>
+    <tr><td>1</td><td>8</td><td><code>seq</code></td><td>段序号，<strong>从 1 开始连续递增</strong></td></tr>
+    <tr><td>9</td><td>8</td><td><code>len</code></td><td>该段<strong>密文</strong>长度（不含 tag）</td></tr>
+    <tr><td>17</td><td>12</td><td><code>nonce</code></td><td>本段独立 GCM nonce</td></tr>
+    <tr><td>29</td><td>4</td><td><code>CRC32</code></td><td>覆盖 <code>type(1) + seq(8) + len(8) + nonce(12)</code>，即前 29 字节，大端</td></tr>
+  </table>
+  <p>段在文件中的占用长度 = <code>33 + len + 16</code>（段头 + 密文 + tag）。</p>
+
+  <h3>段 AAD（13 B）</h3>
+  <pre><code>AAD = "VGS2"(4) + 用途(1) + 段序号(8, 大端)</code></pre>
+  <table>
+    <tr><th>用途字节</th><th>含义</th></tr>
+    <tr><td><code>0x00</code></td><td>manifest 段</td></tr>
+    <tr><td><code>0x01</code></td><td>数据段</td></tr>
+  </table>
+  <ul>
+    <li>注意<strong>用途字节与段头的类型字节取值不同</strong>（段头：数据 <code>0x01</code> / manifest <code>0x02</code>）。</li>
+    <li>序号进入 AAD → 段被重排、替换或拼接时认证立即失败。</li>
+  </ul>
+
+  <h3>数据段明文</h3>
+  <p>数据段明文是一段 <strong>tar 流</strong>（可包含多个文件），其内部路径由 manifest 的 <code>tar_path</code> 指向。为控制段大小，写入时按目标段大小（默认 64 MiB）切分，因此一个段的 tar 流只承载该批文件。</p>
+
+  <h3>manifest 段明文</h3>
+  <pre><code>manifest = 条目数(4, 大端)
+         + 条目 × N</code></pre>
+  <table>
+    <tr><th>字段</th><th>长度</th><th>说明</th></tr>
+    <tr><td><code>name_len</code></td><td>2</td><td>条目名长度（UTF-8 字节数）</td></tr>
+    <tr><td><code>name</code></td><td>name_len</td><td>条目名（UTF-8）</td></tr>
+    <tr><td><code>is_dir</code></td><td>1</td><td>非 0 表示目录</td></tr>
+    <tr><td><code>size</code></td><td>8</td><td>原始大小（无符号）</td></tr>
+    <tr><td><code>mtime</code></td><td>8</td><td>修改时间（<strong>有符号</strong> i64，Unix 秒）</td></tr>
+    <tr><td><code>seg</code></td><td>8</td><td>内容所在数据段的序号</td></tr>
+    <tr><td><code>tar_path_len</code></td><td>2</td><td>tar 内路径长度</td></tr>
+    <tr><td><code>tar_path</code></td><td>tar_path_len</td><td>该条目在数据段 tar 流中的路径（UTF-8）</td></tr>
+  </table>
+  <p>解码要求严格：长度为负/超限、UTF-8 非法、或<strong>末尾存在尾随字节</strong>，均判定为 manifest 损坏。</p>
+
+  <h3>扫描与崩溃回退</h3>
+  <ol>
+    <li>扫描从偏移 50（全局头之后）开始，按段头依次前进，要求 <code>seq</code> 从 1 开始<strong>连续</strong>。</li>
+    <li>遇到以下任一情况即<strong>停止扫描</strong>，把余下内容视为尾部垃圾：段头 CRC 校验失败、段类型未知、<code>seq</code> 不连续、剩余长度不足以容纳段头 + tag、读取失败。</li>
+    <li>取扫描到的<strong>最后一份完整且认证通过的 manifest 段</strong>作为当前视图。</li>
+  </ol>
+  <div class="warn">
+    <b>回退语义的边界（诚实说明）</b>
+    该机制用于保障<strong>崩溃 / 断电</strong>场景：写段时先写占位段头，写入密文与 tag 后再回填段头，最后单次 <code>fsync</code>，因此中断只会留下被忽略的尾段。<strong>它不提供对"有能力回滚或整体替换文件"的攻击者的检测</strong>——此类场景请依赖文件系统快照或外部校验。
+  </div>
+
+  <h3>追加、删除与压缩</h3>
+  <ul>
+    <li><strong>新增</strong>：追加一个或多个数据段 + 一份新 manifest 段。</li>
+    <li><strong>删除 / 改名 / 移动</strong>：只追加一份新 manifest 段（不重写旧数据段）。</li>
+    <li><strong>压缩（GC）</strong>：全量重写，回收被隐藏的旧段；触发方式为手动，或自动（垃圾率 &gt; 30% 且箱子 &gt; 256 MB，或累计 32 份 manifest）。</li>
+    <li><strong>已知边界</strong>：删除后条目立刻从 manifest 消失，但物理旧段在压缩前仍留在文件中；持有箱子与口令的人理论上可从中恢复。追加式保存以此换取写入速度。</li>
+  </ul>
+
+  <h3>并行化的格式约束（v2.1 起）</h3>
+  <div class="warn">
+    <b>写盘顺序 = 段序号顺序</b>
+    段之间彼此独立（各自 nonce / AAD），因此<strong>加密与认证可以跨线程并行</strong>；但段序号必须与文件中的物理顺序一致，所以<strong>写盘必须按序号串行</strong>。实现这一约束时不得让步，否则上述崩溃回退语义失效。
+  </div>
+</section>
+
+<section id="limits">
+  <h2>常量与上限</h2>
+  <table>
+    <tr><th>常量</th><th>值</th><th>说明</th></tr>
+    <tr><td><code>HDR_SZ</code></td><td>50 B</td><td>VGS2 全局头</td></tr>
+    <tr><td><code>SEG_HDR_SZ</code></td><td>33 B</td><td>段头</td></tr>
+    <tr><td><code>NONCE_SZ</code> / <code>TAG_SZ</code></td><td>12 / 16 B</td><td>GCM nonce / 认证标记</td></tr>
+    <tr><td><code>MAX_NAME</code></td><td>4096 B</td><td>条目名与 tar 路径各自的上限</td></tr>
+    <tr><td><code>MAX_ENTRIES</code></td><td>1,000,000</td><td>manifest 条目数上限</td></tr>
+    <tr><td><code>MAX_MANIFEST_LEN</code></td><td>64 MiB</td><td>manifest 段解码上限（防恶意长度导致超大分配）</td></tr>
+    <tr><td><code>MAX_SEGMENT_LEN</code></td><td>1 TiB（2<sup>50</sup>）</td><td>单段明文长度上限</td></tr>
+    <tr><td>段目标大小</td><td>64 MiB</td><td>写入时的分批目标（实现参数，非格式常量）</td></tr>
+    <tr><td>弱口令表 / 强度评估</td><td>—</td><td>纯界面辅助，不影响格式</td></tr>
+  </table>
+</section>
+
+<section id="compat">
+  <h2>兼容承诺</h2>
+  <ol>
+    <li><strong>旧格式永远可解</strong>：<code>VG\x01</code>、<code>VG\x02</code>、<code>VG\x03</code>、<code>VGS1</code>、<code>VGS2</code> 的解码路径永久保留，不会因为版本升级被移除。</li>
+    <li><strong>格式变更纪律</strong>：任何格式变更 = 新魔数 / 新版本号头 + 旧格式仍可解 + 测试向量入库。性能与实现优化不得改变既有布局语义（v2.1 的多段并行加密即属此类：格式未变）。</li>
+    <li><strong>可独立实现</strong>：本规范不含任何未公开的编码细节，第三方可据此实现读取器。</li>
+    <li><strong>测试向量</strong>：仓库内测试覆盖格式往返与篡改检测（段头 CRC 篡改、AAD 换序号、manifest 截断 / 尾随数据等），见 <code>VaultGuard_rs/</code> 下的测试。</li>
+  </ol>
+  <p class="lead">规范版本 1.0 对应程序 v2.1.0。若后续格式演进，本页会同步更新并保留历史版本说明。</p>
+</section>
+
+</main>
+
+<footer>
+  VaultGuard · MIT License · <a href="index.html">返回首页</a> · <a href="https://github.com/AAAduck/VaultGuard">GitHub</a>
+</footer>
+
+</body>
+</html>
