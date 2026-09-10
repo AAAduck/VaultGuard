@@ -34,6 +34,11 @@ fn worker_count() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)
 }
 
+/// 增量段级 GC 一波段解密时允许驻留内存的明文总量。段级 GC 的收益主要来自
+/// 「不落明文临时文件」（省掉写 + 读回 + 覆写擦除三趟 I/O）。取与并行加密同一个
+/// 预算：一波 8 段 × 64MiB 段目标恰好用满，加密批次随即出队，峰值与保存路径相当。
+const GC_WAVE_MEM_BUDGET: u64 = PARALLEL_BUF_BUDGET;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
@@ -85,6 +90,9 @@ pub struct Session {
     storage: Storage,
     dirty: bool,
     next_stage: u64,
+    /// 最近一次段级 GC 的统计 (全死段跳过数, 纯活段整段复用数, 输出数据段数)。
+    /// 仅 `compact_incremental` 更新；其余保存路径维持上一次的值。
+    pub gc_stats: (usize, usize, usize),
 }
 
 impl Drop for Session {
@@ -113,6 +121,7 @@ pub fn create(path: &Path, pass: &str) -> io::Result<Session> {
         storage: Storage::New,
         dirty: true,
         next_stage: 1,
+        gc_stats: (0, 0, 0),
     };
     if let Err(e) = s.save(&|_| {}) {
         return Err(e);
@@ -184,6 +193,7 @@ fn open_v2(path: &Path, pass: &str) -> io::Result<Session> {
         },
         dirty: false,
         next_stage: 1,
+        gc_stats: (0, 0, 0),
     };
     s.refresh_entries();
     Ok(s)
@@ -214,6 +224,7 @@ fn open_v1(path: &Path, pass: &str) -> io::Result<Session> {
             storage: Storage::LegacyV1,
             dirty: false,
             next_stage: 1,
+            gc_stats: (0, 0, 0),
         };
         s.refresh_entries();
         Ok(s)
@@ -427,8 +438,9 @@ impl Session {
     }
 
     /// 手动「压缩」：仅保留当前可见条目，原子重写并回收删除/旧 manifest 的物理空间。
+    /// 走增量段级 GC（见 [`Session::compact_incremental`]）。
     pub fn compact(&mut self, prog: &dyn Fn(u8)) -> io::Result<()> {
-        self.rewrite_all_v2(prog)
+        self.compact_incremental(prog)
     }
 
     pub fn export(&self, out_root: &Path, prog: &dyn Fn(u64, u64)) -> io::Result<(PathBuf, usize)> {
@@ -580,7 +592,7 @@ impl Session {
         self.refresh_entries();
         prog(100);
         if self.gc_needed()? {
-            self.rewrite_all_v2(prog)?;
+            self.compact_incremental(prog)?;
         }
         Ok(())
     }
@@ -713,6 +725,171 @@ impl Session {
         })();
         profile::phase("cleanup", || cleanup(&work));
         let (key, segments, nodes) = match result {
+            Ok(x) => x,
+            Err(e) => {
+                cleanup(&tmp);
+                return Err(e);
+            }
+        };
+        profile::phase("replace", || replace_container(&tmp, &self.path))?;
+        self.nodes = nodes;
+        self.storage = Storage::V2 { key, segments, manifest_count: 1 };
+        self.dirty = false;
+        self.clear_staged_adds();
+        self.refresh_entries();
+        prog(100);
+        Ok(())
+    }
+
+    /// 增量段级 GC：结果与 [`Session::rewrite_all_v2`] 等价（新容器只含存活数据、
+    /// 只保留一份 manifest），但把成本从「全量解密 → 重打包 → 重加密」降到按段处理：
+    ///
+    /// - **全死段**（无任何存活条目引用）整段跳过：不读、不解密、不写；
+    /// - **纯活段**（段内文件全部存活）在内存中解密后整段重加密为新段，跳过 tar
+    ///   解包/重打包，也不落明文临时文件；超出本轮内存额度的段退回临时文件 +
+    ///   流式转发（不做整段复用，否则会丢掉 8 线程并行加密，实测更慢）；
+    /// - **混合段**（段内含已删除文件）走批转发重打包。
+    ///
+    /// 段序号必须与物理顺序一致（写盘串行、加密并行），所以存活段一律重新编号；
+    /// 主密钥与全局头沿用不变（无新盐、不再跑 Argon2；每段 nonce 重新随机取，
+    /// 不存在 (key, nonce) 复用）。崩溃回退语义不变：先写占位段头，tag 落盘后回填，
+    /// 全容器校验通过才原子替换旧箱。
+    fn compact_incremental(&mut self, prog: &dyn Fn(u8)) -> io::Result<()> {
+        let (key, prior) = match &self.storage {
+            Storage::V2 { key, segments, .. } => (*key, segments.clone()),
+            // 新箱/旧格式没有可复用数据段，直接全量重写（顺带完成 VGS1 升级）。
+            _ => return self.rewrite_all_v2(prog),
+        };
+        // 暂存条目尚未成为可复用数据段，交给全量重写统一处理。
+        if self
+            .nodes
+            .values()
+            .any(|n| !matches!(n.source, Source::Existing { .. } | Source::Dir))
+        {
+            return self.rewrite_all_v2(prog);
+        }
+        let tmp = self.path.with_extension("vgsafe.tmp");
+        cleanup(&tmp);
+        let work = mktmpdir();
+        let container = self.path.clone();
+        let result = (|| -> io::Result<(Vec<vgs2::SegmentMeta>, BTreeMap<String, Node>)> {
+            // 存活条目按源段分组；未被引用的数据段就是可整段回收的垃圾。
+            let mut seg_groups: BTreeMap<u64, Vec<(String, String)>> = BTreeMap::new();
+            for node in self.nodes.values() {
+                if let Source::Existing { seg, tar_path } = &node.source {
+                    seg_groups
+                        .entry(*seg)
+                        .or_default()
+                        .push((tar_path.clone(), tar_path.clone()));
+                }
+            }
+            let seg_map: BTreeMap<u64, vgs2::SegmentMeta> =
+                prior.iter().map(|s| (s.head.seq, *s)).collect();
+            let dead = prior
+                .iter()
+                .filter(|s| {
+                    s.head.seg_type == vgs2::SEG_DATA && !seg_groups.contains_key(&s.head.seq)
+                })
+                .count();
+            let total: u64 = self.nodes.values().filter(|n| !n.is_dir).map(|n| n.size).sum();
+            let workers = worker_count();
+            let mut reused = 0usize;
+
+            let mut f = File::create(&tmp)?;
+            // 全局头原样复制：盐与 KDF 参数不变 → 主密钥不变（省掉一次 Argon2）。
+            let mut hdr = [0u8; vgs2::HDR_SZ];
+            File::open(&container)?.read_exact(&mut hdr)?;
+            f.write_all(&hdr)?;
+
+            let mut new_nodes = self.nodes.clone();
+            let mut segs: Vec<vgs2::SegmentMeta> = Vec::new();
+            let mut next = 1u64;
+            if !seg_groups.is_empty() {
+                let mut done = 0u64;
+                let mut last = 0u8;
+                let list: Vec<(u64, Vec<(String, String)>)> = seg_groups.into_iter().collect();
+                let (arc_to_seg, metas, next_after) = profile::phase("gc-write", || {
+                    let mut sink = SegSink::new(&mut f, key, 1, work.join("batches"), workers);
+                    for (a, b) in gc_waves(&list, &seg_map, workers) {
+                        let wave = decrypt_wave_gc(&list[a..b], &seg_map, key, &work, &container)?;
+                        for payload in wave {
+                            let arcs: Vec<String> =
+                                payload.wanted.iter().map(|(_, to)| to.clone()).collect();
+                            match payload.plain {
+                                GcPlain::Mem(data) => {
+                                    if tarx::tar_bytes_is_subset_of(&data, &payload.wanted)? {
+                                        // 纯活段：整段明文直接作为新数据段重加密
+                                        reused += 1;
+                                        let plain = tarx::BatchPlain::Mem(data);
+                                        done = done.saturating_add(plain.len());
+                                        sink.push(plain, arcs)?;
+                                    } else {
+                                        done = done.saturating_add(data.len() as u64);
+                                        sink.relay_bytes(&data, &payload.wanted)?;
+                                    }
+                                    report_pct(prog, &mut last, done, total);
+                                }
+                                GcPlain::Temp(path) => {
+                                    // 内存额度不足的大段：仍走临时文件 + 批转发。
+                                    // 这里刻意不做「整段复用」——它要靠流式串行加密，
+                                    // 会丢掉批转发的 8 线程并行加密，实测更慢。
+                                    let sz = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                    sink.relay(&path, &payload.wanted)?;
+                                    done = done.saturating_add(sz);
+                                    report_pct(prog, &mut last, done, total);
+                                    cleanup(&path);
+                                }
+                            }
+                        }
+                    }
+                    sink.finish()?;
+                    Ok::<_, io::Error>((sink.arc_to_seg, sink.segs, sink.next))
+                })?;
+                segs = metas;
+                next = next_after;
+                for (name, node) in &mut new_nodes {
+                    if node.is_dir {
+                        continue;
+                    }
+                    let arc = match &node.source {
+                        Source::Existing { tar_path, .. } => tar_path.clone(),
+                        _ => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("GC 遇到非常驻条目：{name}"),
+                            ))
+                        }
+                    };
+                    let seg = arc_to_seg.get(&arc).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "条目缺少对应数据段")
+                    })?;
+                    node.source = Source::Existing { seg: *seg, tar_path: arc };
+                }
+            }
+            for node in new_nodes.values_mut() {
+                if node.is_dir {
+                    node.source = Source::Dir;
+                }
+            }
+            let manifest = make_manifest_for(&new_nodes)?;
+            let ms = profile::phase("manifest-write", || {
+                vgs2::append_stream_segment(
+                    &mut f,
+                    vgs2::SEG_MANIFEST,
+                    next,
+                    &key,
+                    random_bytes::<NONCE_SZ>(),
+                    |w| w.write_all(&manifest),
+                )
+            })?;
+            segs.push(ms);
+            profile::phase("fsync", || f.sync_all())?;
+            profile::phase("verify", || verify_v2_container(&tmp, &key))?;
+            self.gc_stats = (dead, reused, segs.len() - 1);
+            Ok((segs, new_nodes))
+        })();
+        profile::phase("cleanup", || cleanup(&work));
+        let (segments, nodes) = match result {
             Ok(x) => x,
             Err(e) => {
                 cleanup(&tmp);
@@ -1078,6 +1255,100 @@ fn decrypt_wave(
     Ok(out)
 }
 
+/// 按内存额度给待处理段切波：尽量让一波内的段都能驻留内存（走免落盘的整段复用），
+/// 只有单段本身就超过额度时才退回临时文件。切波只影响「哪些段解到内存」，
+/// 不改段序号顺序（写盘仍串行按序）。
+fn gc_waves(
+    list: &[(u64, Vec<(String, String)>)],
+    seg_map: &BTreeMap<u64, vgs2::SegmentMeta>,
+    workers: usize,
+) -> Vec<(usize, usize)> {
+    let mut waves = Vec::new();
+    let mut i = 0usize;
+    while i < list.len() {
+        let mut j = i;
+        let mut acc = 0u64;
+        while j < list.len() && j - i < workers.max(1) {
+            let len = seg_map.get(&list[j].0).map(|s| s.head.len).unwrap_or(u64::MAX);
+            if j > i && (len > GC_WAVE_MEM_BUDGET || acc.saturating_add(len) > GC_WAVE_MEM_BUDGET) {
+                break;
+            }
+            acc = acc.saturating_add(len);
+            j += 1;
+        }
+        waves.push((i, j));
+        i = j;
+    }
+    waves
+}
+
+/// 增量 GC 一波解密后的明文载体：小段进内存（免落盘），大段落临时文件（内存有界）。
+enum GcPlain {
+    Mem(Vec<u8>),
+    Temp(PathBuf),
+}
+
+/// 增量 GC 的一波段解密结果：源段序号 + 明文载体 + 该段存活条目的转发映射。
+struct GcWave {
+    seq: u64,
+    plain: GcPlain,
+    wanted: Vec<(String, String)>,
+}
+
+/// 增量 GC 用的一波并行解密。段长 ≤ [`PARALLEL_MEM_CAP`] 且本轮内存额度允许时
+/// 直接解到内存（省掉「写明文临时文件 → 读回 → 覆写擦除」三趟 I/O），否则退回
+/// 临时文件 + 流式转发。内存额度按序号顺序分配，保证行为与线程调度无关；一波
+/// 峰值不超过 [`GC_WAVE_MEM_BUDGET`]。
+fn decrypt_wave_gc(
+    chunk: &[(u64, Vec<(String, String)>)],
+    seg_map: &BTreeMap<u64, vgs2::SegmentMeta>,
+    key: [u8; 32],
+    work: &Path,
+    container: &Path,
+) -> io::Result<Vec<GcWave>> {
+    let mut budget = GC_WAVE_MEM_BUDGET;
+    let mut plan = Vec::with_capacity(chunk.len());
+    for (seq, _) in chunk {
+        let len = seg_map.get(seq).map(|s| s.head.len).unwrap_or(u64::MAX);
+        let fits = len <= PARALLEL_MEM_CAP && len <= budget;
+        if fits {
+            budget -= len;
+        }
+        plan.push(fits);
+    }
+    let mut out: Vec<GcWave> = Vec::with_capacity(chunk.len());
+    std::thread::scope(|scope| -> io::Result<()> {
+        let mut handles = Vec::with_capacity(chunk.len());
+        for ((seq, wanted), in_mem) in chunk.iter().zip(plan) {
+            let seg = seg_map.get(seq).copied().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段")
+            })?;
+            let seq = *seq;
+            let wanted = wanted.clone();
+            let container = container.to_path_buf();
+            let payload = work.join(format!("relay-{seq}.tar"));
+            handles.push(scope.spawn(move || -> io::Result<GcWave> {
+                let plain = if in_mem {
+                    let mut f = File::open(&container)?;
+                    GcPlain::Mem(vgs2::decrypt_segment_to_vec(&mut f, seg, &key, PARALLEL_MEM_CAP)?)
+                } else {
+                    let mut fout = File::create(&payload)?;
+                    vgs2::decrypt_segment_to_file(&mut File::open(&container)?, seg, &key, &mut fout)?;
+                    drop(fout);
+                    GcPlain::Temp(payload)
+                };
+                Ok(GcWave { seq, plain, wanted })
+            }));
+        }
+        for h in handles {
+            out.push(join_result(h)?);
+        }
+        Ok(())
+    })?;
+    out.sort_by_key(|w| w.seq);
+    Ok(out)
+}
+
 /// 新容器的数据段写入器：攒批 → 并行加密 → 按序号顺序落盘。
 ///
 /// 每段独立 nonce/AAD（格式本身支持乱序，但段序号必须与文件位置一致），因此
@@ -1121,6 +1392,15 @@ impl<'a> SegSink<'a> {
         let dir = self.batch_dir.join(format!("b{:04}", self.batch_call));
         self.batch_call = self.batch_call.saturating_add(1);
         tarx::relay_files_batched(tp, wanted, SEG_TARGET, PARALLEL_MEM_CAP, &dir, &mut |batch| {
+            self.push(batch.plain, batch.arcs)
+        })
+    }
+
+    /// 同 [`SegSink::relay`]，但源是内存中的 tar 镜像（增量 GC 免落盘的混合段重打包）。
+    fn relay_bytes(&mut self, data: &[u8], wanted: &[(String, String)]) -> io::Result<usize> {
+        let dir = self.batch_dir.join(format!("b{:04}", self.batch_call));
+        self.batch_call = self.batch_call.saturating_add(1);
+        tarx::relay_bytes_batched(data, wanted, SEG_TARGET, PARALLEL_MEM_CAP, &dir, &mut |batch| {
             self.push(batch.plain, batch.arcs)
         })
     }

@@ -257,6 +257,40 @@ pub fn decrypt_segment_to_file(
     Ok(seg.head.len)
 }
 
+/// 认证解密一个数据段到内存。`max_len` 由调用方给出，段头声称的长度超过它即拒绝，
+/// 避免按不可信长度分配。用于段级 GC 的免落盘路径（只对已知有界的段使用）。
+pub fn decrypt_segment_to_vec(
+    f: &mut File,
+    seg: SegmentMeta,
+    key: &[u8; 32],
+    max_len: u64,
+) -> io::Result<Vec<u8>> {
+    if seg.head.seg_type != SEG_DATA || seg.head.len > max_len || seg.head.len > MAX_SEGMENT_LEN {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "数据段长度或类型无效"));
+    }
+    let len = usize::try_from(seg.head.len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "数据段长度超出本机地址空间"))?;
+    f.seek(SeekFrom::Start(seg.body_offset))?;
+    let mut g = Gcm::new(key, &seg.head.nonce, &seg_aad(seg.head.seg_type, seg.head.seq));
+    let mut out = vec![0u8; len];
+    let mut left = len;
+    let mut off = 0usize;
+    while left > 0 {
+        let take = left.min(IO_BLOCK);
+        f.read_exact(&mut out[off..off + take])?;
+        g.ghash_data(&out[off..off + take]);
+        g.crypt_in_place(&mut out[off..off + take]);
+        off += take;
+        left -= take;
+    }
+    let mut tag = [0u8; TAG_SZ];
+    f.read_exact(&mut tag)?;
+    if !ct_eq(&g.finish_tag(), &tag) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "段认证失败：数据被改动或序号不符"));
+    }
+    Ok(out)
+}
+
 /// 仅认证段内容，不保存或分配明文。新容器原子替换前用它做完整自校验。
 pub fn verify_segment(f: &mut File, seg: SegmentMeta, key: &[u8; 32]) -> io::Result<()> {
     if seg.head.len > MAX_SEGMENT_LEN {

@@ -294,3 +294,86 @@ fn write_v1(path: &Path, pass: &str, tree: &Path) {
     f.write_all(&ct).unwrap();
     f.write_all(&g.finish_tag()).unwrap();
 }
+
+/// 增量段级 GC：多次 add 各自成段后删除中间条目 —— 全死段应整段回收，
+/// 纯活段应整段复用（跳过解包/重打包），且新容器仍是「数据段 + 单 manifest」。
+#[test]
+fn incremental_gc_skips_dead_segments_and_reuses_live_ones() {
+    let root = temp_root("gc_incremental");
+    let vault = root.join("box.vgsafe");
+    let a = root.join("a.bin");
+    let b = root.join("b.bin");
+    let c = root.join("c.bin");
+    fs::write(&a, vec![0x11; 200_000]).unwrap();
+    fs::write(&b, vec![0x22; 200_000]).unwrap();
+    fs::write(&c, vec![0x33; 200_000]).unwrap();
+
+    let mut s = safe::create(&vault, "pass-gc").unwrap();
+    s.add_paths(&[a]).unwrap();
+    s.save(&|_| {}).unwrap();
+    s.add_paths(&[b]).unwrap();
+    s.save(&|_| {}).unwrap();
+    s.add_paths(&[c]).unwrap();
+    s.save(&|_| {}).unwrap();
+    // 删除中间的 b：它独占的数据段与其它段互不重叠
+    s.remove_entries(&["b.bin".to_string()]).unwrap();
+    s.save(&|_| {}).unwrap();
+
+    let before = fs::metadata(&vault).unwrap().len();
+    s.compact(&|_| {}).unwrap();
+    let after = fs::metadata(&vault).unwrap().len();
+    assert_eq!(s.gc_stats, (1, 2, 2), "全死段 1、纯活段复用 2、输出数据段 2");
+    assert!(after < before, "压缩应回收已删除数据：{after} >= {before}");
+    assert_eq!(segment_kinds(&vault), vec![vgs2::SEG_DATA, vgs2::SEG_DATA, vgs2::SEG_MANIFEST]);
+    drop(s);
+
+    let s = safe::open(&vault, "pass-gc").unwrap();
+    let names: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["a.bin", "c.bin"]);
+    let out = root.join("out");
+    let n = s
+        .export_selective(&["a.bin".to_string(), "c.bin".to_string()], &out)
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(fs::read(out.join("a.bin")).unwrap(), vec![0x11; 200_000]);
+    assert_eq!(fs::read(out.join("c.bin")).unwrap(), vec![0x33; 200_000]);
+    drop(s);
+    fs::remove_dir_all(root).ok();
+}
+
+/// 含目录条目的纯活段：目录/子目录条目不是数据，判定「无垃圾」时必须忽略，
+/// 否则会退化成不必要的重打包。复用后嵌套路径仍须可还原。
+#[test]
+fn incremental_gc_reuses_live_segment_with_directories() {
+    let root = temp_root("gc_dirs");
+    let vault = root.join("box.vgsafe");
+    let dir = root.join("dir1");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("x.txt"), "x").unwrap();
+    fs::write(dir.join("sub/y.txt"), "y").unwrap();
+    let victim = root.join("z.bin");
+    fs::write(&victim, vec![0x44; 100_000]).unwrap();
+
+    let mut s = safe::create(&vault, "pass-dir").unwrap();
+    s.add_paths(&[dir]).unwrap();
+    s.save(&|_| {}).unwrap();
+    s.add_paths(&[victim]).unwrap();
+    s.save(&|_| {}).unwrap();
+    s.remove_entries(&["z.bin".to_string()]).unwrap();
+    s.save(&|_| {}).unwrap();
+
+    s.compact(&|_| {}).unwrap();
+    assert_eq!(s.gc_stats, (1, 1, 1), "含目录条目的纯活段也应整段复用");
+    drop(s);
+
+    let s = safe::open(&vault, "pass-dir").unwrap();
+    let names: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"dir1/x.txt"), "{names:?}");
+    assert!(names.contains(&"dir1/sub/y.txt"), "{names:?}");
+    let out = root.join("out");
+    s.export_selective(&["dir1".to_string()], &out).unwrap();
+    assert_eq!(fs::read(out.join("dir1/x.txt")).unwrap(), b"x");
+    assert_eq!(fs::read(out.join("dir1/sub/y.txt")).unwrap(), b"y");
+    drop(s);
+    fs::remove_dir_all(root).ok();
+}

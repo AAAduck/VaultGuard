@@ -1,0 +1,7 @@
+# vgs2-bench run --files 10000 --total-bytes 5368709120  (v2.1 基线：全量重写 GC，同会话 A/B)
+files=10000 total=5368709120 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-18224-1789055531833986500 gen_s=6.778 create_s=0.235 add_s=54.796 save_s=25.003 open_s=0.279 compact_s=34.948 entries=10000 v1gen_s=45.520 v1open_s=45.362 upgrade_s=22.142
+files=10000 total=5368709120 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-15860-1789055800948786500 gen_s=13.362 create_s=0.209 add_s=58.564 save_s=23.820 open_s=0.258 compact_s=32.007 entries=10000 v1gen_s=50.002 v1open_s=45.450 upgrade_s=21.348
+files=10000 total=5368709120 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-12804-1789056079894505500 gen_s=13.395 create_s=0.209 add_s=57.050 save_s=23.733 open_s=0.266 compact_s=33.951 entries=10000 v1gen_s=49.653 v1open_s=43.307 upgrade_s=22.069

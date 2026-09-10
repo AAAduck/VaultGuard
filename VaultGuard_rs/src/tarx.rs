@@ -292,6 +292,38 @@ pub fn list_file(tp: &Path) -> io::Result<Vec<(String, u64, bool)>> {
     Ok(out)
 }
 
+/// 判断 tar 内**文件**条目是否全部落在 `wanted` 的源路径集合里。
+///
+/// 段级 GC 用：返回 true 时该段不含任何已删除文件，可整段复用（明文直接重新加密），
+/// 跳过解包与重打包。目录/链接等非文件条目一律忽略 —— 它们不携带数据，还原时
+/// 结构来自 manifest，转发路径本身也会丢弃它们；只有「某个文件已不在存活的
+/// tar 路径集合里」才说明该段含垃圾、必须重打包。
+pub fn tar_is_subset_of<R: io::Read>(src: R, wanted: &[(String, String)]) -> io::Result<bool> {
+    let live: std::collections::BTreeSet<&str> =
+        wanted.iter().map(|(from, _)| from.as_str()).collect();
+    let mut ar = tar::Archive::new(src);
+    for entry in ar.entries()? {
+        let e = entry?;
+        if !e.header().entry_type().is_file() {
+            continue;
+        }
+        let raw = e.path()?.to_string_lossy().to_string();
+        let name = raw.trim_matches('/').to_string();
+        if name.is_empty() || name == "." {
+            continue;
+        }
+        if !live.contains(name.as_str()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// 同 [`tar_is_subset_of`]，但源是内存中的 tar 镜像（段级 GC 的纯活段判定）。
+pub fn tar_bytes_is_subset_of(data: &[u8], wanted: &[(String, String)]) -> io::Result<bool> {
+    tar_is_subset_of(data, wanted)
+}
+
 /// 从一个已认证的临时 tar 提取指定文件。目标路径由调用者从已认证 manifest
 /// 生成；tar 内未匹配条目一律忽略，避免整段物化。
 pub fn extract_files(tp: &Path, wanted: &[(String, PathBuf)]) -> io::Result<usize> {
@@ -378,12 +410,49 @@ pub fn relay_files_batched<F>(
 where
     F: FnMut(RelayBatch) -> io::Result<()>,
 {
+    let f = File::open(tp)?;
+    relay_batched(
+        std::io::BufReader::with_capacity(1 << 20, f),
+        wanted,
+        target,
+        mem_cap,
+        spill_dir,
+        on_batch,
+    )
+}
+
+/// 同 [`relay_files_batched`]，但源是内存中的 tar 镜像（增量 GC 的免落盘路径）。
+pub fn relay_bytes_batched<F>(
+    data: &[u8],
+    wanted: &[(String, String)],
+    target: u64,
+    mem_cap: u64,
+    spill_dir: &Path,
+    on_batch: &mut F,
+) -> io::Result<usize>
+where
+    F: FnMut(RelayBatch) -> io::Result<()>,
+{
+    relay_batched(data, wanted, target, mem_cap, spill_dir, on_batch)
+}
+
+/// 转发实现：源可以是文件也可以是内存 tar 镜像，批组装逻辑共用。
+fn relay_batched<R: io::Read, F>(
+    src: R,
+    wanted: &[(String, String)],
+    target: u64,
+    mem_cap: u64,
+    spill_dir: &Path,
+    on_batch: &mut F,
+) -> io::Result<usize>
+where
+    F: FnMut(RelayBatch) -> io::Result<()>,
+{
     let mut map = std::collections::BTreeMap::new();
     for (from, to) in wanted {
         map.insert(from.as_str(), to.as_str());
     }
-    let f = File::open(tp)?;
-    let mut ar = tar::Archive::new(std::io::BufReader::with_capacity(1 << 20, f));
+    let mut ar = tar::Archive::new(src);
     let mut cur: Option<(tar::Builder<Vec<u8>>, Vec<String>)> = None;
     let mut spill_idx = 0u64;
     let mut n = 0usize;

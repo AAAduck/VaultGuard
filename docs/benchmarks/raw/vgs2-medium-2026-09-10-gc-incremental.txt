@@ -1,0 +1,7 @@
+# vgs2-bench run --files 1000 --total-bytes 1073741824  (v2.2 增量段级 GC)
+files=1000 total=1073741824 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-21020-1789055298997924100 gen_s=0.842 create_s=0.187 add_s=2.512 save_s=3.117 open_s=0.169 compact_s=4.788 gc_dead=0 gc_reuse=17 gc_segs=17 entries=1000 v1gen_s=5.893 v1open_s=5.590 upgrade_s=3.906
+files=1000 total=1073741824 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-20908-1789055331074313000 gen_s=0.924 create_s=0.220 add_s=3.055 save_s=4.901 open_s=0.160 compact_s=2.840 gc_dead=0 gc_reuse=17 gc_segs=17 entries=1000 v1gen_s=5.447 v1open_s=5.542 upgrade_s=3.770
+files=1000 total=1073741824 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-19696-1789055363261043900 gen_s=1.054 create_s=0.274 add_s=3.428 save_s=4.307 open_s=0.195 compact_s=3.061 gc_dead=0 gc_reuse=17 gc_segs=17 entries=1000 v1gen_s=5.357 v1open_s=5.250 upgrade_s=4.043

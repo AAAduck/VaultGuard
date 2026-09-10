@@ -432,13 +432,15 @@ fn run_once(opts: &Opts, run: u32) -> Result<String, String> {
     out.push_str(&format!(" open_s={:.3}", t0.elapsed().as_secs_f64()));
     out.push_str(&profile_line("open", opts));
 
-    // 6) 全量压缩（GC 重写：物化 → 重打包 → 自校验 → 原子替换）
+    // 6) 全量压缩（增量段级 GC：全死段跳过 → 纯活段整段复用 → 自校验 → 原子替换）
     let mut sess = opened;
     profile_begin(opts);
     let t0 = Instant::now();
     sess.compact(&|_| {}).map_err(|e| format!("compact 阶段失败: {e}"))?;
     out.push_str(&format!(" compact_s={:.3}", t0.elapsed().as_secs_f64()));
     out.push_str(&profile_line("compact", opts));
+    let (gc_dead, gc_reuse, gc_segs) = sess.gc_stats;
+    out.push_str(&format!(" gc_dead={gc_dead} gc_reuse={gc_reuse} gc_segs={gc_segs}"));
 
     // 压缩后再次打开核对条目数
     drop(sess);

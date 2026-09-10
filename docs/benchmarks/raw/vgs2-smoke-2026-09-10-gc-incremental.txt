@@ -1,0 +1,13 @@
+# vgs2-bench run --files 100 --total-bytes 268435456  (v2.2 增量段级 GC)
+files=100 total=268435456 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-20472-1789055395163212800 gen_s=0.172 create_s=0.194 add_s=0.559 save_s=0.782 open_s=0.159 compact_s=0.955 gc_dead=0 gc_reuse=5 gc_segs=5 entries=100 v1gen_s=3.299 v1open_s=2.066 upgrade_s=1.590
+files=100 total=268435456 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-19488-1789055406011284400 gen_s=0.182 create_s=0.179 add_s=0.510 save_s=0.844 open_s=0.183 compact_s=2.705 gc_dead=0 gc_reuse=5 gc_segs=5 entries=100 v1gen_s=2.354 v1open_s=2.034 upgrade_s=1.067
+files=100 total=268435456 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-19800-1789055416816287000 gen_s=0.161 create_s=0.165 add_s=0.515 save_s=0.757 open_s=0.160 compact_s=2.299 gc_dead=0 gc_reuse=5 gc_segs=5 entries=100 v1gen_s=1.712 v1open_s=1.372 upgrade_s=1.029
+files=100 total=268435456 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-21200-1789055437773766800 gen_s=0.202 create_s=0.233 add_s=0.610 save_s=0.777 open_s=0.171 compact_s=1.367 gc_dead=0 gc_reuse=5 gc_segs=5 entries=100 v1gen_s=1.542 v1open_s=1.354 upgrade_s=1.142
+files=100 total=268435456 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-20032-1789055446359131400 gen_s=0.154 create_s=0.173 add_s=0.504 save_s=0.787 open_s=0.159 compact_s=0.861 gc_dead=0 gc_reuse=5 gc_segs=5 entries=100 v1gen_s=2.863 v1open_s=2.032 upgrade_s=1.311
+files=100 total=268435456 runs=1
+run=1 work=D:\vg2bench_tmp\vg2bench\run-3784-1789055456007233400 gen_s=0.175 create_s=0.284 add_s=0.680 save_s=0.744 open_s=0.168 compact_s=0.854 gc_dead=0 gc_reuse=5 gc_segs=5 entries=100 v1gen_s=1.502 v1open_s=1.312 upgrade_s=1.029
