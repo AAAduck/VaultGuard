@@ -96,6 +96,69 @@ pub fn pack_recursive_entries<W: Write>(items: &[(PathBuf, String)], w: W) -> io
     Ok(())
 }
 
+/// 统计路径的纯文件数据字节（目录递归求和）。供分批打包估算段大小。
+fn path_data_bytes(p: &Path) -> u64 {
+    let md = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if md.is_dir() {
+        let mut sum = 0u64;
+        if let Ok(rd) = std::fs::read_dir(p) {
+            for e in rd.flatten() {
+                sum += path_data_bytes(&e.path());
+            }
+        }
+        sum
+    } else if md.is_file() {
+        md.len()
+    } else {
+        0
+    }
+}
+
+/// 把多个根条目按纯文件字节分批打包成多个 tar（每批 ≤ `target` 字节，
+/// 单个条目超过上限时独占一批）。返回 (tar 路径, 该 tar 包含的条目下标)。
+/// VGS2 批量暂存用：add 时按段大小拆分，保存时各批并行加密为独立数据段。
+/// `tag` 用于区分同一次会话中的多批 add（同目录下避免互相覆盖）。
+pub fn pack_split_tars(
+    items: &[(PathBuf, String)],
+    target: u64,
+    dir: &Path,
+    tag: u64,
+) -> io::Result<Vec<(PathBuf, Vec<usize>)>> {
+    std::fs::create_dir_all(dir)?;
+    let mut out: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+    let mut cur_path: Option<PathBuf> = None;
+    let mut cur: Option<tar::Builder<std::fs::File>> = None;
+    let mut cur_items: Vec<usize> = Vec::new();
+    let mut cur_bytes: u64 = 0;
+    let mut file_idx: u64 = 0;
+    for (i, (src, arc)) in items.iter().enumerate() {
+        let sz = path_data_bytes(src);
+        if cur.is_some() && cur_bytes > 0 && cur_bytes.saturating_add(sz) > target {
+            // 封尾当前 tar
+            cur.take().expect("cur").finish()?;
+            out.push((cur_path.take().expect("path"), std::mem::take(&mut cur_items)));
+            cur_bytes = 0;
+        }
+        if cur.is_none() {
+            let p = dir.join(format!("{tag:08x}-{file_idx:08x}.tar"));
+            file_idx += 1;
+            cur_path = Some(p.clone());
+            cur = Some(tar::Builder::new(std::fs::File::create(&p)?));
+        }
+        append_recursive(cur.as_mut().expect("cur"), src, arc)?;
+        cur_items.push(i);
+        cur_bytes = cur_bytes.saturating_add(sz);
+    }
+    if let Some(mut b) = cur.take() {
+        b.finish()?;
+        out.push((cur_path.take().expect("path"), std::mem::take(&mut cur_items)));
+    }
+    Ok(out)
+}
+
 fn append_one<W: Write>(b: &mut tar::Builder<W>, abs: &Path, arc: &str, is_dir: bool) -> io::Result<()> {
     let md = std::fs::symlink_metadata(abs)?;
     if is_dir != md.is_dir() || (!is_dir && !md.is_file()) {
@@ -261,32 +324,114 @@ pub fn extract_files(tp: &Path, wanted: &[(String, PathBuf)]) -> io::Result<usiz
     Ok(n)
 }
 
-/// 从已认证的临时 tar 中把「存活条目」原样转发到新的 tar 流（压缩/换口令用）。
-/// wanted: (原 tar 路径, 转发后 tar 路径) —— 压缩时两者相同（manifest 的 tar_path 保留）。
-/// 非存活条目自动跳过；返回转发条目数。
-pub fn relay_files<W: Write>(tp: &Path, wanted: &[(String, String)], w: W) -> io::Result<usize> {
+/// 转发批的明文载体：小批驻留内存（供并行加密），超大批落盘（调用方流式串行处理）。
+#[derive(Debug)]
+pub enum BatchPlain {
+    Mem(Vec<u8>),
+    Disk(PathBuf),
+}
+
+/// 一批转发结果：明文载体 + 该批包含的转发后路径（供调用方建立 arc→段 映射）。
+#[derive(Debug)]
+pub struct RelayBatch {
+    pub plain: BatchPlain,
+    pub arcs: Vec<String>,
+}
+
+impl BatchPlain {
+    /// 该批明文字节数（用于调用方的内存预算）。
+    pub fn len(&self) -> u64 {
+        match self {
+            BatchPlain::Mem(v) => v.len() as u64,
+            BatchPlain::Disk(p) => std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+        }
+    }
+}
+
+/// 封一个内存批：补 tar 尾部并交给回调。
+fn seal_mem<F>(cur: &mut Option<(tar::Builder<Vec<u8>>, Vec<String>)>, on_batch: &mut F) -> io::Result<()>
+where
+    F: FnMut(RelayBatch) -> io::Result<()>,
+{
+    if let Some((b, arcs)) = cur.take() {
+        let buf = b.into_inner()?; // 写入 tar 尾部并取回缓冲
+        on_batch(RelayBatch { plain: BatchPlain::Mem(buf), arcs })?;
+    }
+    Ok(())
+}
+
+/// 从已认证的临时 tar 把存活条目转发成多个大小受控的明文批。
+///
+/// 批在内存中累积：`target` 为封批目标（≈ 段大小），`mem_cap` 为单批内存上限。
+/// 单个条目本身就超过 `mem_cap` 时该条目独占一批并落盘到 `spill_dir`，由调用方
+/// 流式串行处理 —— 既保住「整段进内存」的内存有界性，又不为常规条目多写一份
+/// 明文临时文件（明文临时文件意味着额外一次写 + 一次覆写擦除）。
+/// 每批就绪即回调 `on_batch`；返回转发条目数。
+pub fn relay_files_batched<F>(
+    tp: &Path,
+    wanted: &[(String, String)],
+    target: u64,
+    mem_cap: u64,
+    spill_dir: &Path,
+    on_batch: &mut F,
+) -> io::Result<usize>
+where
+    F: FnMut(RelayBatch) -> io::Result<()>,
+{
     let mut map = std::collections::BTreeMap::new();
     for (from, to) in wanted {
         map.insert(from.as_str(), to.as_str());
     }
     let f = File::open(tp)?;
     let mut ar = tar::Archive::new(std::io::BufReader::with_capacity(1 << 20, f));
-    let mut b = tar::Builder::new(w);
+    let mut cur: Option<(tar::Builder<Vec<u8>>, Vec<String>)> = None;
+    let mut spill_idx = 0u64;
     let mut n = 0usize;
     for entry in ar.entries()? {
         let e = entry?;
         let raw = e.path()?.to_string_lossy().to_string();
         let name = raw.trim_matches('/').to_string();
-        let Some(out_arc) = map.get(name.as_str()) else { continue };
+        let Some(to) = map.get(name.as_str()).copied() else { continue };
         let _ = sanitize_rel(&name)?;
         if !e.header().entry_type().is_file() {
             continue;
         }
+        // 该条目在段内的近似字节数（头 512B + 数据按 512 对齐）
+        let entry_bytes = 512 + e.header().size().unwrap_or(0).div_ceil(512) * 512;
+        // 1) 单个条目超过内存上限：独占一批并落盘（调用方流式处理）
+        if entry_bytes > mem_cap {
+            seal_mem(&mut cur, on_batch)?;
+            std::fs::create_dir_all(spill_dir)?;
+            let p = spill_dir.join(format!("spill-{spill_idx:05}.tar"));
+            spill_idx += 1;
+            let mut b = tar::Builder::new(File::create(&p)?);
+            let mut header = e.header().clone();
+            b.append_data(&mut header, to, e)?;
+            b.finish()?;
+            on_batch(RelayBatch { plain: BatchPlain::Disk(p), arcs: vec![to.to_string()] })?;
+            n += 1;
+            continue;
+        }
+        // 2) 当前内存批装不下 → 先封批
+        let over = cur.as_ref().map(|(b, _)| b.get_ref().len() as u64 + entry_bytes > mem_cap).unwrap_or(false);
+        if over {
+            seal_mem(&mut cur, on_batch)?;
+        }
+        // 3) 追加到内存批
+        if cur.is_none() {
+            cur = Some((tar::Builder::new(Vec::with_capacity(1 << 20)), Vec::new()));
+        }
+        let (b, arcs) = cur.as_mut().expect("cur");
         let mut header = e.header().clone();
-        b.append_data(&mut header, out_arc, e)?;
+        b.append_data(&mut header, to, e)?;
+        arcs.push(to.to_string());
         n += 1;
+        // 4) 达到封批目标 → 交批
+        if b.get_ref().len() as u64 >= target {
+            seal_mem(&mut cur, on_batch)?;
+        }
     }
-    b.finish()?;
+    seal_mem(&mut cur, on_batch)?;
     Ok(n)
 }
 

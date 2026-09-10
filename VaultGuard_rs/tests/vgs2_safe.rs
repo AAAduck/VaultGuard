@@ -127,6 +127,151 @@ fn compact_reclaims_deleted_segments_and_v1_save_upgrades() {
     fs::remove_dir_all(root).ok();
 }
 
+/// 同一次会话内多次 add（每次生成独立暂存 tar 批）必须先全部正确保存：
+/// 段序号连续、manifest 指向正确段、两份内容都能原样导出。
+#[test]
+fn multiple_adds_before_save_keep_all_contents() {
+    let root = temp_root("multi_add");
+    let vault = root.join("box.vgsafe");
+    let a = root.join("第一份.bin");
+    let b = root.join("第二份.bin");
+    let c = root.join("第三份.bin");
+    fs::write(&a, vec![0xA1; 200_000]).unwrap();
+    fs::write(&b, vec![0xB2; 200_000]).unwrap();
+    fs::write(&c, vec![0xC3; 200_000]).unwrap();
+
+    let mut s = safe::create(&vault, "pass-multi").unwrap();
+    s.add_paths(&[a]).unwrap();
+    s.add_paths(&[b]).unwrap();
+    s.add_paths(&[c]).unwrap();
+    s.save(&|_| {}).unwrap();
+    assert_eq!(
+        segment_kinds(&vault).iter().filter(|k| **k == vgs2::SEG_DATA).count(),
+        3,
+        "三次 add 应各自成为独立数据段"
+    );
+    drop(s);
+
+    // 重新打开：段序号必须从 1 连续（扫描器只认连续序号），内容逐一比对
+    let mut f = File::open(&vault).unwrap();
+    let segs = vgs2::scan_segments(&mut f).unwrap();
+    for (i, seg) in segs.iter().enumerate() {
+        assert_eq!(seg.head.seq, 1 + i as u64);
+    }
+    drop(f);
+
+    let s = safe::open(&vault, "pass-multi").unwrap();
+    let out = root.join("out");
+    s.export_selective(
+        &["第一份.bin".to_string(), "第二份.bin".to_string(), "第三份.bin".to_string()],
+        &out,
+    )
+    .unwrap();
+    assert_eq!(fs::read(out.join("第一份.bin")).unwrap(), vec![0xA1; 200_000]);
+    assert_eq!(fs::read(out.join("第二份.bin")).unwrap(), vec![0xB2; 200_000]);
+    assert_eq!(fs::read(out.join("第三份.bin")).unwrap(), vec![0xC3; 200_000]);
+    drop(s);
+    fs::remove_dir_all(root).ok();
+}
+
+/// 分批打包（并行加密的粒度控制）：按目标字节数切多个 tar，条目下标必须完整覆盖。
+#[test]
+fn pack_split_tars_splits_by_target_and_covers_all_items() {
+    let root = temp_root("split_tars");
+    let mut items: Vec<(PathBuf, String)> = Vec::new();
+    for i in 0..7u32 {
+        let p = root.join(format!("f{i}.bin"));
+        fs::write(&p, vec![i as u8; 40_000]).unwrap();
+        items.push((p, format!("f{i}.bin")));
+    }
+    let dir = root.join("tars");
+    let tars = tarx::pack_split_tars(&items, 100_000, &dir, 7).unwrap();
+    assert!(tars.len() >= 3, "7×40KB / 100KB 目标应切成多个 tar，实际 {}", tars.len());
+    let mut seen: Vec<usize> = tars.iter().flat_map(|(_, idx)| idx.clone()).collect();
+    seen.sort_unstable();
+    assert_eq!(seen, (0..items.len()).collect::<Vec<_>>(), "每个条目必须恰好归属一个 tar");
+    for (p, _) in &tars {
+        // 文件名带 tag 前缀，避免同一会话多次 add 互相覆盖
+        assert!(p.file_name().unwrap().to_string_lossy().starts_with("00000007-"));
+    }
+    // 再次调用（同目录、不同 tag）不得覆盖上一批
+    let again = tarx::pack_split_tars(&items, 100_000, &dir, 8).unwrap();
+    assert_eq!(again.len(), tars.len());
+    for (p, _) in &tars {
+        assert!(p.exists(), "前一批暂存 tar 必须仍存在：{}", p.display());
+    }
+    fs::remove_dir_all(root).ok();
+}
+
+/// 转发分批（并行加密的粒度控制）：小条目驻留内存、超 mem_cap 的条目落盘成批，
+/// 且每个内存批都是可独立解开的合法 tar（尾部补块必须完整）。
+#[test]
+fn relay_batches_mem_and_spill_paths() {
+    let root = temp_root("relay_batches");
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let mut items: Vec<(PathBuf, String)> = Vec::new();
+    for i in 0..5u32 {
+        let p = src.join(format!("f{i}.bin"));
+        fs::write(&p, vec![i as u8 + 1; 300_000]).unwrap();
+        items.push((p, format!("f{i}.bin")));
+    }
+    let tp = root.join("src.tar");
+    tarx::pack_recursive_entries(&items, File::create(&tp).unwrap()).unwrap();
+    let wanted: Vec<(String, String)> = items.iter().map(|(_, a)| (a.clone(), a.clone())).collect();
+    let spill = root.join("spill");
+
+    // 小条目：全部驻留内存批（mem_cap 1 MiB > 单条目 ~300 KiB），按 target 切批
+    let mut mem: Vec<(Vec<String>, Vec<u8>)> = Vec::new();
+    let n = tarx::relay_files_batched(&tp, &wanted, 700_000, 1 << 20, &spill, &mut |b| {
+        match b.plain {
+            tarx::BatchPlain::Mem(v) => mem.push((b.arcs, v)),
+            tarx::BatchPlain::Disk(_) => panic!("小条目不应落盘"),
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(n, 5);
+    // 单条目 ≈ 300_544B（512 头 + 数据对齐）：2 条 601KB < 700KB 目标，3 条 901KB 超目标
+    // 且再加一条会越过 1 MiB 的 mem_cap → 3 条一批 + 剩余 2 条一批
+    assert_eq!(mem.len(), 2, "实际 {}", mem.len());
+    assert_eq!(mem.iter().map(|(a, _)| a.len()).collect::<Vec<_>>(), vec![3, 2]);
+    for (_, bytes) in &mem {
+        assert!(bytes.len() as u64 <= 1 << 20, "内存批不得超过 mem_cap");
+    }
+    let arcs: usize = mem.iter().map(|(a, _)| a.len()).sum();
+    assert_eq!(arcs, 5, "每个条目必须恰好归属一批");
+    // 每个内存批都能独立解包（tar 尾部完整、条目数据不跨批）
+    let out = root.join("unpack");
+    let mut names: Vec<String> = Vec::new();
+    for (i, (_, bytes)) in mem.iter().enumerate() {
+        let p = root.join(format!("b{i}.tar"));
+        fs::write(&p, bytes).unwrap();
+        let k = tarx::unpack_file(&p, &out).unwrap();
+        assert!(k >= 1, "内存批必须包含完整条目");
+        for (name, _, _) in tarx::list_file(&p).unwrap() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    assert_eq!(names, vec!["f0.bin", "f1.bin", "f2.bin", "f3.bin", "f4.bin"]);
+
+    // 超大条目：单条目 300 KiB > mem_cap 100 KiB → 独占一批并落盘
+    let mut spilled = 0usize;
+    let n = tarx::relay_files_batched(&tp, &wanted, 700_000, 100_000, &spill, &mut |b| {
+        match b.plain {
+            tarx::BatchPlain::Mem(_) => panic!("超过 mem_cap 的条目不应驻留内存"),
+            tarx::BatchPlain::Disk(_) => spilled += 1,
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(n, 5);
+    assert_eq!(spilled, 5);
+    assert!(spill.read_dir().unwrap().count() >= 5);
+    fs::remove_dir_all(root).ok();
+}
+
 fn write_v1(path: &Path, pass: &str, tree: &Path) {
     let mut plain = Vec::new();
     tarx::pack_dir(tree, &mut plain).unwrap();

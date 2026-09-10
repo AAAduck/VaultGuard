@@ -1,0 +1,4 @@
+# vgs2-bench segenc-parallel 64 16 / crypto 1073741824
+segenc_parallel seg_mib=64 count=16 workers=8 serial_s=2.631 parallel_s=0.604 speedup=4.36x serial_mbs=408.1 parallel_mbs=1779.1
+segenc_parallel seg_mib=32 count=8 workers=8 serial_s=0.671 parallel_s=0.160 speedup=4.18x serial_mbs=400.2 parallel_mbs=1674.8
+gcm_mbs=446.7 ghash_only_mbs=997.8 bytes=1073741824 full_s=2.404 ghash_s=1.076

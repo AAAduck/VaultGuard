@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use crate::crypto::{ct_eq, Gcm};
 use crate::profile;
@@ -502,6 +503,128 @@ fn invalid_utf8(_: std::string::FromUtf8Error) -> io::Error {
 
 // ── 段体加解密原语（P0：非流式；P1 容器读写再演进为流式）────────
 
+/// 已加密数据段的结果：顺序写回容器时使用（P6 并行加密路径）。
+#[derive(Debug)]
+pub struct BatchResult {
+    pub seq: u64,
+    pub ct: Vec<u8>,
+    pub tag: [u8; 16],
+    pub nonce: [u8; 12],
+}
+
+/// 并行加密一批明文段（每段独立 nonce/AAD，互不依赖，可跨线程）。
+/// 返回与输入顺序一致的加密结果（按 seq 排序）。`workers` 为 0/1 时退化为串行。
+/// 明文按值传入并原地加密，避免并行时出现「明文 + 密文」双份内存驻留。
+pub fn encrypt_batches_parallel(
+    key: &[u8; 32],
+    seg_type: u8,
+    start_seq: u64,
+    plains: Vec<Vec<u8>>,
+    workers: usize,
+) -> io::Result<Vec<BatchResult>> {
+    if plains.is_empty() {
+        return Ok(Vec::new());
+    }
+    if plains.len() as u64 > u64::MAX - start_seq {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "段序号溢出"));
+    }
+    let workers = workers.max(1).min(plains.len());
+    let out: std::sync::Mutex<Vec<(usize, BatchResult)>> = std::sync::Mutex::new(Vec::with_capacity(plains.len()));
+    let mut plains: Vec<Option<Vec<u8>>> = plains.into_iter().map(Some).collect();
+    std::thread::scope(|scope| {
+        for w in 0..workers {
+            let mine: Vec<(usize, Vec<u8>)> = plains
+                .iter_mut()
+                .enumerate()
+                .skip(w)
+                .step_by(workers)
+                .filter_map(|(i, p)| p.take().map(|plain| (i, plain)))
+                .collect();
+            let out = &out;
+            scope.spawn(move || {
+                let mut rng = rand::thread_rng();
+                let mut local = Vec::with_capacity(mine.len());
+                for (i, plain) in mine {
+                    let mut nonce = [0u8; NONCE_SZ];
+                    rand::RngCore::fill_bytes(&mut rng, &mut nonce);
+                    let seq = start_seq + i as u64;
+                    let (ct, tag) = encrypt_payload_owned(key, seg_type, seq, &nonce, plain);
+                    local.push((i, BatchResult { seq, ct, tag, nonce }));
+                }
+                out.lock().unwrap().extend(local);
+            });
+        }
+    });
+    let mut results = out.into_inner().unwrap();
+    results.sort_by_key(|(i, _)| *i);
+    Ok(results.into_iter().map(|(_, r)| r).collect())
+}
+
+/// 顺序写回一批已加密的数据段：占位段头 + 密文 + tag 全部写完后再统一回填段头，
+/// 最后单次 fsync。中途崩溃时未回填的段头 CRC 无效，扫描停止，回退到此前已认证 manifest。
+/// `results` 必须按 seq 升序。
+pub fn write_segments_sequential(f: &mut File, results: Vec<BatchResult>) -> io::Result<Vec<SegmentMeta>> {
+    let mut metas = Vec::with_capacity(results.len());
+    let mut offsets: Vec<(u64, &BatchResult)> = Vec::with_capacity(results.len());
+    for r in &results {
+        if r.ct.len() as u64 > MAX_SEGMENT_LEN {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "段数据超出格式上限"));
+        }
+        let header_offset = f.seek(SeekFrom::End(0))?;
+        f.write_all(&[0u8; SEG_HDR_SZ])?;
+        f.write_all(&r.ct)?;
+        f.write_all(&r.tag)?;
+        offsets.push((header_offset, r));
+    }
+    for (header_offset, r) in &offsets {
+        let head = SegHead { seg_type: SEG_DATA, seq: r.seq, len: r.ct.len() as u64, nonce: r.nonce };
+        f.seek(SeekFrom::Start(*header_offset))?;
+        f.write_all(&encode_seg_head(&head))?;
+        metas.push(SegmentMeta { head, body_offset: header_offset + SEG_HDR_SZ as u64 });
+    }
+    f.seek(SeekFrom::End(0))?;
+    f.sync_all()?;
+    Ok(metas)
+}
+
+/// 并行认证校验一批段（每线程独立文件句柄），任一失败即返回该错误。
+pub fn verify_segments_parallel(path: &Path, segs: &[SegmentMeta], key: &[u8; 32], workers: usize) -> io::Result<()> {
+    let n = segs.len();
+    if n == 0 {
+        return Ok(());
+    }
+    let workers = workers.max(1).min(n);
+    let errs: std::sync::Mutex<Option<io::Error>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for w in 0..workers {
+            let mine: Vec<SegmentMeta> = segs.iter().skip(w).step_by(workers).cloned().collect();
+            let errs = &errs;
+            scope.spawn(move || {
+                if errs.lock().unwrap().is_some() {
+                    return;
+                }
+                let mut f = match File::open(path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        *errs.lock().unwrap() = Some(e);
+                        return;
+                    }
+                };
+                for seg in mine {
+                    if let Err(e) = verify_segment(&mut f, seg, key) {
+                        *errs.lock().unwrap() = Some(e);
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    match errs.into_inner().unwrap() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// 加密段体 → (密文, tag)。AAD 绑定段类型与序号。
 pub fn encrypt_payload(
     key: &[u8; 32],
@@ -510,12 +633,22 @@ pub fn encrypt_payload(
     nonce: &[u8; 12],
     plain: &[u8],
 ) -> (Vec<u8>, [u8; 16]) {
+    encrypt_payload_owned(key, seg_type, seq, nonce, plain.to_vec())
+}
+
+/// 同 `encrypt_payload`，但明文按值传入并原地加密（大段可省一次整段拷贝）。
+fn encrypt_payload_owned(
+    key: &[u8; 32],
+    seg_type: u8,
+    seq: u64,
+    nonce: &[u8; 12],
+    mut plain: Vec<u8>,
+) -> (Vec<u8>, [u8; 16]) {
     let mut g = Gcm::new(key, nonce, &seg_aad(seg_type, seq));
-    let mut ct = plain.to_vec();
-    g.crypt_in_place(&mut ct);
-    g.ghash_data(&ct);
+    g.crypt_in_place(&mut plain);
+    g.ghash_data(&plain);
     let tag = g.finish_tag();
-    (ct, tag)
+    (plain, tag)
 }
 
 /// 认证解密段体：校验通过才返回明文；AAD（含序号）不符即认证失败。
@@ -730,5 +863,75 @@ mod tests {
         assert!(decrypt_payload(&key, SEG_DATA, 2, &nonce, &ct, &tag).is_err());
         // 换段类型（模拟拼接他段数据）→ 认证失败
         assert!(decrypt_payload(&key, SEG_MANIFEST, 1, &nonce, &ct, &tag).is_err());
+    }
+
+    fn scan_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "vaultguard-vgs2-{tag}-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn parallel_batch_encrypt_write_and_scan_roundtrip() {
+        // P6/§十二 并行加密：每段独立 nonce/AAD，可跨线程；写盘必须按序号顺序。
+        let path = scan_path("parallel");
+        let key = [0x5a; 32];
+        let plains: Vec<Vec<u8>> = vec![
+            b"seg-one".to_vec(),
+            vec![0x11; 4096],
+            Vec::new(),
+            vec![0x22; 300_000],
+            b"seg-five".to_vec(),
+        ];
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&encode_header(KID_ARGON2ID, 65_536, 3, 1, &[0x11; 16], &[0x22; 12]).unwrap())
+            .unwrap();
+        let expected = plains.clone();
+        let results = encrypt_batches_parallel(&key, SEG_DATA, 1, plains, 4).unwrap();
+        assert_eq!(results.len(), expected.len());
+        // 序号必须与输入顺序一致
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(r.seq, 1 + i as u64);
+        }
+        let metas = write_segments_sequential(&mut f, results).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+
+        let mut f = File::open(&path).unwrap();
+        let scanned = scan_segments(&mut f).unwrap();
+        assert_eq!(scanned, metas);
+        assert_eq!(scanned.len(), expected.len());
+        for (seg, want) in scanned.iter().zip(expected.iter()) {
+            assert_eq!(&read_segment(&mut f, *seg, &key).unwrap(), want);
+        }
+        // 并行校验应通过；改动任一段密文后必须报错
+        verify_segments_parallel(&path, &scanned, &key, 4).unwrap();
+        drop(f);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let tamper = (metas[1].body_offset + 3) as usize;
+        bytes[tamper] ^= 0x40;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(verify_segments_parallel(&path, &scanned, &key, 4).is_err(), "篡改段必须被并行校验拒绝");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn workers_one_matches_multi_worker_output_shape() {
+        // 单线程退化路径与多线程路径产出的段结构一致（nonce 随机，只比结构）
+        let key = [0x33; 32];
+        let mk = || vec![vec![7u8; 1000], vec![8u8; 2000], vec![9u8; 3000]];
+        let a = encrypt_batches_parallel(&key, SEG_DATA, 10, mk(), 1).unwrap();
+        let b = encrypt_batches_parallel(&key, SEG_DATA, 10, mk(), 8).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.seq, y.seq);
+            assert_eq!(x.ct.len(), y.ct.len());
+            assert_ne!(x.nonce, y.nonce, "每段必须独立 nonce");
+        }
     }
 }

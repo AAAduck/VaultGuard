@@ -85,6 +85,12 @@ fn main() {
         segenc_throughput(bytes);
         return;
     }
+    if args.first().map(|s| s.as_str()) == Some("segenc-parallel") {
+        let seg_mib: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(32);
+        let count: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+        segenc_parallel(seg_mib, count);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("segenc-pack") {
         let files: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
         let bytes: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1 << 30);
@@ -244,6 +250,77 @@ fn segenc_throughput(bytes: u64) {
     println!("{s}");
     drop(f);
     let _ = std::fs::remove_dir_all(&work);
+}
+
+/// 段级并行加密对比（§十二 性能纵深）：同样 N 个独立段，串行 vs 多线程。
+/// GCM 单段受串行依赖链限制，但段与段互不依赖（各自 nonce/AAD），可线性分摊。
+/// 用法：vgs2-bench segenc-parallel [seg-mib=32] [count=8]
+fn segenc_parallel(seg_mib: u64, count: u64) {
+    let sz = (seg_mib.max(1) * 1024 * 1024) as usize;
+    let key = [0x42u8; 32];
+    let total = sz as u64 * count.max(1);
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let mk = |seed: u8| -> Vec<Vec<u8>> { (0..count.max(1)).map(|i| vec![seed ^ i as u8; sz]).collect() };
+
+    // 串行基准（workers=1），顺带验证解出明文一致
+    let plains = mk(0x5a);
+    let t0 = Instant::now();
+    let serial_out = vaultguard::vgs2::encrypt_batches_parallel(
+        &key,
+        vaultguard::vgs2::SEG_DATA,
+        1,
+        plains.clone(),
+        1,
+    )
+    .unwrap();
+    let serial = t0.elapsed().as_secs_f64();
+    for (i, r) in serial_out.iter().enumerate() {
+        let back = vaultguard::vgs2::decrypt_payload(
+            &key,
+            vaultguard::vgs2::SEG_DATA,
+            r.seq,
+            &r.nonce,
+            &r.ct,
+            &r.tag,
+        )
+        .unwrap();
+        assert_eq!(back, plains[i], "并行加密结果必须可认证解密回原文");
+    }
+    drop(serial_out);
+    drop(plains);
+
+    let plains = mk(0x5a);
+    let t0 = Instant::now();
+    let par_out = vaultguard::vgs2::encrypt_batches_parallel(
+        &key,
+        vaultguard::vgs2::SEG_DATA,
+        1,
+        plains.clone(),
+        workers,
+    )
+    .unwrap();
+    let par = t0.elapsed().as_secs_f64();
+    for (i, r) in par_out.iter().enumerate() {
+        let back = vaultguard::vgs2::decrypt_payload(
+            &key,
+            vaultguard::vgs2::SEG_DATA,
+            r.seq,
+            &r.nonce,
+            &r.ct,
+            &r.tag,
+        )
+        .unwrap();
+        assert_eq!(back, plains[i], "并行加密结果必须可认证解密回原文");
+    }
+
+    println!(
+        "segenc_parallel seg_mib={seg_mib} count={count} workers={workers} \
+         serial_s={serial:.3} parallel_s={par:.3} speedup={:.2}x \
+         serial_mbs={:.1} parallel_mbs={:.1}",
+        serial / par,
+        total as f64 / 1e6 / serial,
+        total as f64 / 1e6 / par
+    );
 }
 
 /// 内存内 GCM 加密 + GHASH 吞吐（P5：隔离「AES-GCM 耗时」与磁盘 I/O）。

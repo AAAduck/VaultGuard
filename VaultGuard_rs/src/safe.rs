@@ -22,6 +22,17 @@ const V1_HDR_SZ: usize = 4 + 1 + 4 + 4 + 1 + 16 + NONCE_SZ;
 const IO_BLOCK: usize = 1 << 20;
 const AUTO_GC_MIN_BYTES: u64 = 256 * 1024 * 1024;
 const AUTO_GC_MANIFESTS: usize = 32;
+/// 数据段大小目标（并行加密的分批粒度；单个超大文件可独占一段）。
+const SEG_TARGET: u64 = 64 * 1024 * 1024;
+/// 超过该字节的段退回流式串行加密（避免整段明文进内存）。
+const PARALLEL_MEM_CAP: u64 = 128 * 1024 * 1024;
+/// 并行加密时同时驻留内存的明文总量上限（一批 ≈ [`SEG_TARGET`]，8 worker 恰好用满）。
+const PARALLEL_BUF_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// 并行 worker 数：物理核封顶 8（SMT 上超线程对加密提升有限）。
+fn worker_count() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -247,7 +258,8 @@ impl Session {
     fn add_paths_impl(&mut self, srcs: &[PathBuf], organize: bool) -> io::Result<usize> {
         let mut added = 0usize;
         let mut pack_items: Vec<(PathBuf, String)> = Vec::new();
-        let mut entry_infos: Vec<(String, bool, u64, i64, String)> = Vec::new(); // (name, is_dir, size, mtime, arc)
+        // (name, is_dir, size, mtime, arc, item_idx)：item_idx 定位该条目所属的暂存 tar
+        let mut entry_infos: Vec<(String, bool, u64, i64, String, usize)> = Vec::new();
         // 本批次已占用的名字（节点要打包后才插入，重名去重需要提前记账；
         // 除顶层名外还含目录源的子条目名，防止「文件夹 A 的 x.txt」与
         // 单独拖入的 A/x.txt 在本批次内撞名）。
@@ -256,6 +268,7 @@ impl Session {
             if !src.exists() {
                 continue;
             }
+            let item_idx = pack_items.len();
             let raw = src
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
@@ -280,26 +293,37 @@ impl Session {
             self.ensure_parent_dirs(&target)?;
             pack_items.push((src.clone(), target.clone()));
             let start = entry_infos.len();
-            collect_src_entries(src, &target, &mut entry_infos)?;
+            collect_src_entries(src, &target, &mut entry_infos, item_idx)?;
             for (name, ..) in &entry_infos[start..] {
                 pending.insert(name.clone());
             }
             added += 1;
         }
         if added > 0 {
-            // 整批新增合并成一个暂存 tar：保存时作为单个数据段加密，
-            // 避免逐文件小读写（1 万文件档实测可差一个数量级）。
-            let tar_path = self.staged.join("adds").join(format!("{:016x}.tar", self.next_stage));
+            // 整批新增按段大小拆成多个暂存 tar：保存时各批并行加密为独立数据段，
+            // 既避免逐文件小读写（1 万文件档实测可差一个数量级），又让加密可并行。
+            // tag 递增保证同一会话多次 add 不会互相覆盖暂存 tar。
+            let tag = self.next_stage;
             self.next_stage = self.next_stage.wrapping_add(1).max(1);
-            profile::phase("stage-pack", || {
-                let mut f = File::create(&tar_path)?;
-                tarx::pack_recursive_entries(&pack_items, &mut f)
+            let adds_dir = self.staged.join("adds");
+            let tars = profile::phase("stage-pack", || {
+                tarx::pack_split_tars(&pack_items, SEG_TARGET, &adds_dir, tag)
             })?;
-            for (name, is_dir, size, mtime, arc) in entry_infos {
+            // item_idx -> 所属 tar
+            let mut item_to_tar: Vec<Option<PathBuf>> = vec![None; pack_items.len()];
+            for (tar, idxs) in &tars {
+                for &i in idxs {
+                    item_to_tar[i] = Some(tar.clone());
+                }
+            }
+            for (name, is_dir, size, mtime, arc, item_idx) in entry_infos {
                 let source = if is_dir {
                     Source::Dir
                 } else {
-                    Source::StagedTar { tar: tar_path.clone(), arc }
+                    let tar = item_to_tar[item_idx].clone().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "暂存条目缺少所属 tar")
+                    })?;
+                    Source::StagedTar { tar, arc }
                 };
                 self.nodes.insert(name, Node { size, is_dir, mtime, source });
             }
@@ -479,11 +503,12 @@ impl Session {
         profile::phase("truncate", || f.set_len(end))?;
         let mut segments = prior;
         let mut next = segments.last().map(|s| s.head.seq + 1).unwrap_or(1);
-        // 暂存条目按「暂存 tar」分组：(tar, [(arc, arc)]) —— 保存时整段转发。
-        let mut staged_tars: BTreeMap<PathBuf, Vec<(String, String)>> = BTreeMap::new();
+        // 暂存条目按「暂存 tar」分组 —— 每个暂存 tar 直接作为一个数据段（其内容
+        // 即该批文件的 tar 流），攒够 worker 个后并行加密、按序号顺序写回。
+        let mut staged_tars: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
         for node in self.nodes.values() {
             if let Source::StagedTar { tar, arc } = &node.source {
-                staged_tars.entry(tar.clone()).or_default().push((arc.clone(), arc.clone()));
+                staged_tars.entry(tar.clone()).or_default().push(arc.clone());
             }
         }
         // 先在副本上准备本次提交后的索引。只有新 manifest 已完整写入并同步后，
@@ -497,39 +522,40 @@ impl Session {
                 .filter(|n| matches!(n.source, Source::StagedTar { .. }))
                 .map(|n| n.size)
                 .sum();
-            let nonce = random_bytes::<NONCE_SZ>();
             let mut done = 0u64;
             let mut last = 0u8;
-            let data = profile::phase("data-write", || {
-                vgs2::append_stream_segment(
-                    &mut f,
-                    vgs2::SEG_DATA,
-                    next,
-                    &key,
-                    nonce,
-                    |w| {
-                        let mut pw = ProgressWriter { inner: w, done: &mut done, total, last: &mut last, prog };
-                        for (tar, wanted) in &staged_tars {
-                            let n = profile::phase("staged-relay", || tarx::relay_files(tar, wanted, &mut pw))?;
-                            if n != wanted.len() {
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "暂存 tar 缺少所列条目"));
-                            }
-                        }
-                        Ok(())
-                    },
-                )
+            let workers = worker_count();
+            let (arc_to_seg, metas, next_after) = profile::phase("data-write", || {
+                let mut sink = SegSink::new(&mut f, key, next, self.staged.join("batches"), workers);
+                // 暂存 tar 内容已是「该段明文」，直接进并行加密队列；
+                // 超过 PARALLEL_MEM_CAP 的段（单个超大文件）走流式串行，避免整段进内存。
+                for (tar, arcs) in &staged_tars {
+                    let sz = std::fs::metadata(tar).map(|m| m.len()).unwrap_or(0);
+                    if sz <= PARALLEL_MEM_CAP {
+                        // 暂存 tar 内容已是「该段明文」，读入内存后进并行加密队列
+                        let data = std::fs::read(tar)?;
+                        sink.push(tarx::BatchPlain::Mem(data), arcs.clone())?;
+                    } else {
+                        sink.stream_file(tar, arcs)?;
+                    }
+                    done = done.saturating_add(sz);
+                    report_pct(prog, &mut last, done, total);
+                }
+                sink.finish()?;
+                Ok::<_, io::Error>((sink.arc_to_seg, sink.segs, sink.next))
             })?;
+            next = next_after;
             for node in committed_nodes.values_mut() {
                 if let Source::StagedTar { arc, .. } = &node.source {
+                    let seg = arc_to_seg.get(arc).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "暂存条目缺少对应数据段"))?;
                     node.source = if node.is_dir {
                         Source::Dir
                     } else {
-                        Source::Existing { seg: next, tar_path: arc.clone() }
+                        Source::Existing { seg: *seg, tar_path: arc.clone() }
                     };
                 }
             }
-            segments.push(data);
-            next = next.checked_add(1).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "段序号已用尽"))?;
+            segments.extend(metas);
         }
         let manifest = make_manifest_for(&committed_nodes)?;
         if manifest.len() as u64 > vgs2::MAX_MANIFEST_LEN {
@@ -564,11 +590,11 @@ impl Session {
         cleanup(&tmp);
         let work = mktmpdir();
         let result = (|| -> io::Result<([u8; 32], Vec<vgs2::SegmentMeta>, BTreeMap<String, Node>)> {
-            // 分组：已落盘条目按数据段归类（转发）；暂存条目按暂存 tar 归类（转发）；
+            // 分组：已落盘条目按数据段归类（转发）；暂存条目按暂存 tar 归类（整段直用）；
             // 旧格式条目由保留的明文 tar 整段转发。不再物化整棵明文树 ——
             // 压缩/升级只读存活条目，省去树写、树读与树擦除。
             let mut seg_groups: BTreeMap<u64, Vec<(String, String)>> = BTreeMap::new();
-            let mut staged_tars: BTreeMap<PathBuf, Vec<(String, String)>> = BTreeMap::new();
+            let mut staged_arcs: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
             // 旧格式条目：(明文 tar 内原路径 → 转发后路径 = 当前可见名)。
             // 升级前可能已重命名/移动，源路径取节点工作树相对路径。
             let mut legacy_wanted: Vec<(String, String)> = Vec::new();
@@ -580,7 +606,7 @@ impl Session {
                         seg_groups.entry(*seg).or_default().push((tar_path.clone(), tar_path.clone()));
                     }
                     Source::StagedTar { tar, arc } => {
-                        staged_tars.entry(tar.clone()).or_default().push((arc.clone(), arc.clone()));
+                        staged_arcs.entry(tar.clone()).or_default().push(arc.clone());
                     }
                     Source::Legacy(p) => {
                         let rel = p.strip_prefix(&legacy_root).unwrap_or(p).to_string_lossy().replace('\\', "/");
@@ -600,71 +626,69 @@ impl Session {
             let mut f = File::create(&tmp)?;
             f.write_all(&vgs2::encode_header(vgs2::KID_ARGON2ID, prm.m_kib, prm.t, prm.p, &salt, &reserve_nonce)?)?;
             let file_count: usize = seg_groups.values().map(|v| v.len()).sum::<usize>()
-                + staged_tars.values().map(|v| v.len()).sum::<usize>()
+                + staged_arcs.values().map(|v| v.len()).sum::<usize>()
                 + legacy_wanted.len();
-            let mut segs = Vec::new();
+            let mut segs: Vec<vgs2::SegmentMeta> = Vec::new();
             let mut new_nodes = self.nodes.clone();
             let mut next = 1u64;
+            let workers = worker_count();
             if file_count > 0 {
                 let mut done = 0u64;
                 let mut last = 0u8;
                 let total: u64 = self.nodes.values().filter(|n| !n.is_dir).map(|n| n.size).sum();
-                let data = profile::phase("data-write", || {
-                    vgs2::append_stream_segment(
-                        &mut f,
-                        vgs2::SEG_DATA,
-                        next,
-                        &key,
-                        random_bytes::<NONCE_SZ>(),
-                        |w| {
-                            let mut pw = ProgressWriter { inner: w, done: &mut done, total, last: &mut last, prog };
-                            // 1) 转发各存活数据段的存活条目
-                            for (seq, wanted) in &seg_groups {
-                                let seg = seg_map.get(seq).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段"))?;
-                                let old_key = old_key.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式数据段状态无效"))?;
-                                let payload = work.join(format!("relay-{seq}.tar"));
-                                let one = (|| -> io::Result<()> {
-                                    {
-                                        let mut out = File::create(&payload)?;
-                                        profile::phase("seg-decrypt", || vgs2::decrypt_segment_to_file(&mut File::open(&container)?, *seg, &old_key, &mut out))?;
-                                    }
-                                    profile::phase("relay", || tarx::relay_files(&payload, wanted, &mut pw))?;
-                                    cleanup(&payload);
-                                    Ok(())
-                                })();
-                                one?;
-                            }
-                            // 2) 暂存 tar 整段转发
-                            for (tar, wanted) in &staged_tars {
-                                let n = profile::phase("staged-relay", || tarx::relay_files(tar, wanted, &mut pw))?;
-                                if n != wanted.len() {
-                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "暂存 tar 缺少所列条目"));
-                                }
-                            }
-                            // 3) 旧格式明文 tar 整段转发（源路径 → 当前可见名）
-                            if !legacy_wanted.is_empty() {
-                                let lt = legacy_tar.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式会话缺少明文 tar"))?;
-                                let n = profile::phase("legacy-relay", || tarx::relay_files(&lt, &legacy_wanted, &mut pw))?;
-                                if n != legacy_wanted.len() {
-                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "旧格式 tar 缺少所列条目"));
-                                }
-                            }
-                            Ok(())
-                        },
-                    )
+                let (arc_to_seg, metas, next_after) = profile::phase("data-write", || {
+                    let mut sink = SegSink::new(&mut f, key, 1, work.join("batches"), workers);
+                    // 1) 旧数据段：按 worker 波浪「并行解密 → 分批转发」。一波的明文
+                    //    只驻留到该波转发结束，避免整箱明文同时落盘。
+                    let seg_list: Vec<(u64, Vec<(String, String)>)> = seg_groups.into_iter().collect();
+                    for chunk in seg_list.chunks(workers.max(1)) {
+                        let payloads = decrypt_wave(chunk, &seg_map, old_key, &work, &container)?;
+                        for (_, payload, wanted) in &payloads {
+                            let n = sink.relay(payload, wanted)?;
+                            done = done.saturating_add(n as u64);
+                            report_pct(prog, &mut last, done, total);
+                            cleanup(payload);
+                        }
+                    }
+                    // 2) 旧格式明文 tar 整段转发（源路径 → 当前可见名）
+                    if !legacy_wanted.is_empty() {
+                        let lt = legacy_tar.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式会话缺少明文 tar"))?;
+                        let n = sink.relay(&lt, &legacy_wanted)?;
+                        if n != legacy_wanted.len() {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "旧格式 tar 缺少所列条目"));
+                        }
+                        done = done.saturating_add(n as u64);
+                        report_pct(prog, &mut last, done, total);
+                    }
+                    // 3) 暂存 tar：内容即该段明文，直接攒批并行加密
+                    for (tar, arcs) in staged_arcs {
+                        let sz = std::fs::metadata(&tar).map(|m| m.len()).unwrap_or(0);
+                        if sz <= PARALLEL_MEM_CAP {
+                            let data = std::fs::read(&tar)?;
+                            sink.push(tarx::BatchPlain::Mem(data), arcs)?;
+                        } else {
+                            sink.stream_file(&tar, &arcs)?;
+                        }
+                        done = done.saturating_add(sz);
+                        report_pct(prog, &mut last, done, total);
+                    }
+                    sink.finish()?;
+                    Ok::<_, io::Error>((sink.arc_to_seg, sink.segs, sink.next))
                 })?;
+                segs = metas;
+                next = next_after;
                 for (name, node) in &mut new_nodes {
                     if !node.is_dir {
-                        node.source = match &node.source {
-                            Source::Existing { tar_path, .. } => Source::Existing { seg: next, tar_path: tar_path.clone() },
-                            Source::StagedTar { arc, .. } => Source::Existing { seg: next, tar_path: arc.clone() },
-                            Source::Legacy(_) => Source::Existing { seg: next, tar_path: name.clone() },
+                        let arc = match &node.source {
+                            Source::Existing { tar_path, .. } => tar_path.clone(),
+                            Source::StagedTar { arc, .. } => arc.clone(),
+                            Source::Legacy(_) => name.clone(),
                             Source::Dir => unreachable!(),
                         };
+                        let seg = arc_to_seg.get(&arc).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "条目缺少对应数据段"))?;
+                        node.source = Source::Existing { seg: *seg, tar_path: arc };
                     }
                 }
-                segs.push(data);
-                next += 1;
             }
             for node in new_nodes.values_mut() {
                 if node.is_dir {
@@ -743,29 +767,52 @@ impl Session {
             }
         }
         let seg_map = self.segment_map();
+        let key = self.v2_key().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式数据段状态无效"))?;
+        let container = self.path.clone();
         let tmp = tree.parent().unwrap_or(tree).join("segments");
         std::fs::create_dir_all(&tmp)?;
         let mut done = 0u64;
-        for (seq, wanted) in groups {
-            let seg = seg_map.get(&seq).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段"))?;
-            let key = self.v2_key().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "旧格式数据段状态无效"))?;
-            let payload = tmp.join(format!("{seq}.tar"));
-            let one = profile::phase("seg-read", || {
-                (|| -> io::Result<()> {
-                    let mut out = File::create(&payload)?;
-                    let bytes = vgs2::decrypt_segment_to_file(&mut File::open(&self.path)?, *seg, &key, &mut out)?;
-                    drop(out);
-                    let n = tarx::extract_files(&payload, &wanted)?;
-                    if n != wanted.len() {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData, "数据段缺少 manifest 所列条目"));
-                    }
-                    done = done.saturating_add(bytes.min(wanted.iter().map(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum()));
-                    prog(done.min(total), total);
-                    Ok(())
-                })()
-            });
-            cleanup(&payload);
-            one?;
+        let workers = worker_count();
+        // 段间认证链独立：按 worker 波浪并行「解密 → 提取」，各线程写不同的落位路径。
+        // 先解出本波全部明文（认证通过才算数），全员成功后再统一提取，避免半认证部分落位。
+        let group_list: Vec<(u64, Vec<(String, PathBuf)>)> = groups.into_iter().collect();
+        for chunk in group_list.chunks(workers.max(1)) {
+            let mut payloads: Vec<(u64, PathBuf)> = Vec::with_capacity(chunk.len());
+            std::thread::scope(|scope| -> io::Result<()> {
+                let mut handles = Vec::with_capacity(chunk.len());
+                for (seq, _) in chunk {
+                    let seg = seg_map.get(seq).copied().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段")
+                    })?;
+                    let payload = tmp.join(format!("{seq}.tar"));
+                    let container = container.clone();
+                    let seq = *seq;
+                    handles.push(scope.spawn(move || -> io::Result<(u64, PathBuf)> {
+                        let mut out = File::create(&payload)?;
+                        vgs2::decrypt_segment_to_file(&mut File::open(&container)?, seg, &key, &mut out)?;
+                        drop(out);
+                        Ok((seq, payload))
+                    }));
+                }
+                for h in handles {
+                    payloads.push(join_result(h)?);
+                }
+                Ok(())
+            })?;
+            for (seq, payload) in &payloads {
+                let wanted = chunk
+                    .iter()
+                    .find(|(s, _)| s == seq)
+                    .map(|(_, w)| w)
+                    .expect("wave 与分组成对");
+                let n = tarx::extract_files(payload, wanted)?;
+                if n != wanted.len() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "数据段缺少 manifest 所列条目"));
+                }
+                done = done.saturating_add(wanted.iter().map(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum::<u64>());
+                prog(done.min(total), total);
+                cleanup(payload);
+            }
         }
         cleanup(&tmp);
         prog(total, total);
@@ -939,10 +986,8 @@ fn verify_v2_container(path: &Path, key: &[u8; 32]) -> io::Result<()> {
     if segs.is_empty() || segs.last().is_none_or(|s| s.head.seg_type != vgs2::SEG_MANIFEST) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "新保险箱缺少 manifest"));
     }
-    for seg in segs {
-        vgs2::verify_segment(&mut f, seg, key)?;
-    }
-    Ok(())
+    // 每段认证链独立，可并行校验（各线程独立文件句柄）
+    vgs2::verify_segments_parallel(path, &segs, key, worker_count())
 }
 
 fn replace_container(tmp: &Path, path: &Path) -> io::Result<()> {
@@ -973,43 +1018,241 @@ fn replace_container(tmp: &Path, path: &Path) -> io::Result<()> {
     }
 }
 
-struct ProgressWriter<'a> {
-    inner: &'a mut dyn Write,
-    done: &'a mut u64,
-    total: u64,
-    last: &'a mut u8,
-    prog: &'a dyn Fn(u8),
-}
-
-impl Write for ProgressWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write_all(buf)?;
-        *self.done = self.done.saturating_add(buf.len() as u64);
-        let pct = if self.total == 0 { 0 } else { ((*self.done).min(self.total) * 100 / self.total).min(99) as u8 };
-        if pct != *self.last {
-            *self.last = pct;
-            (self.prog)(pct);
-        }
-        Ok(buf.len())
+/// 按字节推进百分比回调（并行批处理路径用：粒度到批）。
+fn report_pct(prog: &dyn Fn(u8), last: &mut u8, done: u64, total: u64) {
+    let pct = if total == 0 {
+        0
+    } else {
+        ((done.min(total) * 100 / total).min(99)) as u8
+    };
+    if pct != *last {
+        *last = pct;
+        prog(pct);
     }
-    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 }
 
-/// 收集新增源的条目元数据：(节点名, 是否目录, 大小, mtime, 暂存 tar 内路径)。
+/// 等待并行任务结果：线程 panic 也转成错误，避免二次崩溃。
+fn join_result<T>(h: std::thread::ScopedJoinHandle<'_, io::Result<T>>) -> io::Result<T> {
+    match h.join() {
+        Ok(r) => r,
+        Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "并行任务异常终止")),
+    }
+}
+
+/// 并行解密一波数据段到临时明文 tar（每线程独立容器句柄 + 独立输出文件）。
+/// 返回 (段序号, 明文 tar 路径, 该段待转发的条目映射)；调用方负责在转发后擦除明文。
+fn decrypt_wave(
+    chunk: &[(u64, Vec<(String, String)>)],
+    seg_map: &BTreeMap<u64, vgs2::SegmentMeta>,
+    old_key: Option<[u8; 32]>,
+    work: &Path,
+    container: &Path,
+) -> io::Result<Vec<(u64, PathBuf, Vec<(String, String)>)>> {
+    let mut out = Vec::with_capacity(chunk.len());
+    std::thread::scope(|scope| -> io::Result<()> {
+        let mut handles = Vec::with_capacity(chunk.len());
+        for (seq, wanted) in chunk {
+            let seg = seg_map.get(seq).copied().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "manifest 引用了不存在的数据段")
+            })?;
+            let key = old_key.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "旧格式数据段状态无效")
+            })?;
+            let payload = work.join(format!("relay-{seq}.tar"));
+            let seq = *seq;
+            let wanted = wanted.clone();
+            let container = container.to_path_buf();
+            handles.push(scope.spawn(move || -> io::Result<(u64, PathBuf, Vec<(String, String)>)> {
+                let mut fout = File::create(&payload)?;
+                vgs2::decrypt_segment_to_file(&mut File::open(&container)?, seg, &key, &mut fout)?;
+                drop(fout);
+                Ok((seq, payload, wanted))
+            }));
+        }
+        for h in handles {
+            out.push(join_result(h)?);
+        }
+        Ok(())
+    })?;
+    out.sort_by_key(|(seq, _, _)| *seq);
+    Ok(out)
+}
+
+/// 新容器的数据段写入器：攒批 → 并行加密 → 按序号顺序落盘。
+///
+/// 每段独立 nonce/AAD（格式本身支持乱序，但段序号必须与文件位置一致），因此
+/// 加密可并行、写入必须串行。批大小目标 [`SEG_TARGET`]，超过 [`PARALLEL_MEM_CAP`]
+/// 的段（单个超大文件）自动退回流式串行，避免整段明文进内存。
+struct SegSink<'a> {
+    f: &'a mut File,
+    key: [u8; 32],
+    next: u64,
+    arc_to_seg: BTreeMap<String, u64>,
+    segs: Vec<vgs2::SegmentMeta>,
+    pending: Vec<tarx::RelayBatch>,
+    batch_dir: PathBuf,
+    batch_call: u64,
+    workers: usize,
+    bytes: u64,
+    pending_bytes: u64,
+}
+
+impl<'a> SegSink<'a> {
+    fn new(f: &'a mut File, key: [u8; 32], start_seq: u64, batch_dir: PathBuf, workers: usize) -> Self {
+        Self {
+            f,
+            key,
+            next: start_seq,
+            arc_to_seg: BTreeMap::new(),
+            segs: Vec::new(),
+            pending: Vec::new(),
+            batch_dir,
+            batch_call: 0,
+            workers: workers.max(1),
+            bytes: 0,
+            pending_bytes: 0,
+        }
+    }
+
+    /// 把已认证临时 tar 的存活条目转发成新数据段（按 [`SEG_TARGET`] 分批）。
+    /// 返回转发条目数。
+    fn relay(&mut self, tp: &Path, wanted: &[(String, String)]) -> io::Result<usize> {
+        // 超大条目（单文件）落盘的溢出目录，每次调用独立，避免覆盖。
+        let dir = self.batch_dir.join(format!("b{:04}", self.batch_call));
+        self.batch_call = self.batch_call.saturating_add(1);
+        tarx::relay_files_batched(tp, wanted, SEG_TARGET, PARALLEL_MEM_CAP, &dir, &mut |batch| {
+            self.push(batch.plain, batch.arcs)
+        })
+    }
+
+    /// 入队一批明文（内存批或超大条目落盘批）；攒够 worker 数或攒够明文预算即并行
+    /// 加密写盘（内存占用受 [`PARALLEL_MEM_CAP`] 与 [`PARALLEL_BUF_BUDGET`] 双重约束）。
+    fn push(&mut self, plain: tarx::BatchPlain, arcs: Vec<String>) -> io::Result<()> {
+        let len = plain.len();
+        if self.pending.len() >= self.workers
+            || (self.pending_bytes > 0 && self.pending_bytes.saturating_add(len) > PARALLEL_BUF_BUDGET)
+        {
+            self.flush()?;
+        }
+        self.pending_bytes = self.pending_bytes.saturating_add(len);
+        self.pending.push(tarx::RelayBatch { plain, arcs });
+        Ok(())
+    }
+
+    /// 把一个超大段流式串行加密写盘（不整段进内存）。
+    fn stream_file(&mut self, path: &Path, arcs: &[String]) -> io::Result<()> {
+        self.flush()?;
+        let data = profile::phase("data-write", || {
+            vgs2::append_stream_segment(
+                self.f,
+                vgs2::SEG_DATA,
+                self.next,
+                &self.key,
+                random_bytes::<NONCE_SZ>(),
+                |w| {
+                    let mut src = File::open(path)?;
+                    let mut buf = vec![0u8; IO_BLOCK];
+                    loop {
+                        let n = src.read(&mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        w.write_all(&buf[..n])?;
+                    }
+                    Ok(())
+                },
+            )
+        })?;
+        for a in arcs {
+            self.arc_to_seg.insert(a.clone(), data.head.seq);
+        }
+        self.segs.push(data);
+        self.bytes = self.bytes.saturating_add(data.head.len);
+        self.next = self.next.checked_add(1).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "段序号已用尽"))?;
+        Ok(())
+    }
+
+    /// 写入剩余待落盘批次。
+    fn finish(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let batches: Vec<tarx::RelayBatch> = self.pending.drain(..).collect();
+        self.pending_bytes = 0;
+        let mut small: Vec<tarx::RelayBatch> = Vec::new();
+        for b in batches {
+            match b.plain {
+                // 超大条目独占的落盘批：流式串行，避免整段进内存
+                tarx::BatchPlain::Disk(path) => {
+                    self.flush_plain(&mut small)?;
+                    self.stream_file(&path, &b.arcs)?;
+                }
+                tarx::BatchPlain::Mem(_) => small.push(b),
+            }
+        }
+        self.flush_plain(&mut small)
+    }
+
+    /// 并行加密一批明文段并按序号顺序写回。
+    fn flush_plain(&mut self, small: &mut Vec<tarx::RelayBatch>) -> io::Result<()> {
+        if small.is_empty() {
+            return Ok(());
+        }
+        let batches: Vec<tarx::RelayBatch> = small.drain(..).collect();
+        let mut arcs_all: Vec<Vec<String>> = Vec::with_capacity(batches.len());
+        let mut plains: Vec<Vec<u8>> = Vec::with_capacity(batches.len());
+        for b in batches {
+            let data = match b.plain {
+                tarx::BatchPlain::Mem(v) => v,
+                // 正常路径不会走到（Disk 批在 flush 中已分流），兜底读回
+                tarx::BatchPlain::Disk(p) => std::fs::read(&p)?,
+            };
+            self.bytes = self.bytes.saturating_add(data.len() as u64);
+            arcs_all.push(b.arcs);
+            plains.push(data);
+        }
+        let results = profile::phase("parallel-encrypt", || {
+            vgs2::encrypt_batches_parallel(&self.key, vgs2::SEG_DATA, self.next, plains, self.workers)
+        })?;
+        let metas = profile::phase("seg-write", || vgs2::write_segments_sequential(self.f, results))?;
+        for (arcs, meta) in arcs_all.iter().zip(metas.iter()) {
+            for a in arcs {
+                self.arc_to_seg.insert(a.clone(), meta.head.seq);
+            }
+            self.segs.push(*meta);
+        }
+        self.next = self
+            .next
+            .checked_add(metas.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "段序号已用尽"))?;
+        Ok(())
+    }
+}
+
+/// 收集新增源的条目元数据：(节点名, 是否目录, 大小, mtime, 暂存 tar 内路径, 所属条目下标)。
 /// 目录递归；文件与目录的 arc 均为「目标名 + 相对路径」（与打包进暂存 tar 的路径一致）。
-fn collect_src_entries(src: &Path, name: &str, out: &mut Vec<(String, bool, u64, i64, String)>) -> io::Result<()> {
+fn collect_src_entries(
+    src: &Path,
+    name: &str,
+    out: &mut Vec<(String, bool, u64, i64, String, usize)>,
+    item_idx: usize,
+) -> io::Result<()> {
     let md = std::fs::symlink_metadata(src)?;
     if md.is_dir() {
-        out.push((name.to_string(), true, 0, modified_secs(&md), name.to_string()));
+        out.push((name.to_string(), true, 0, modified_secs(&md), name.to_string(), item_idx));
         let mut kids: Vec<PathBuf> = std::fs::read_dir(src)?.flatten().map(|e| e.path()).collect();
         kids.sort();
         for child in kids {
             let raw = child.file_name().and_then(|x| x.to_str()).unwrap_or("file");
             let child_name = format!("{name}/{}", safe_name(raw, 100));
-            collect_src_entries(&child, &child_name, out)?;
+            collect_src_entries(&child, &child_name, out, item_idx)?;
         }
     } else if md.is_file() {
-        out.push((name.to_string(), false, md.len(), modified_secs(&md), name.to_string()));
+        out.push((name.to_string(), false, md.len(), modified_secs(&md), name.to_string(), item_idx));
     }
     Ok(())
 }
