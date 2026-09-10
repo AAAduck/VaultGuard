@@ -90,6 +90,7 @@ struct VaultApp {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     logs: Vec<String>,
+    last_error: Option<String>, // P2：最近一次失败（独立成卡片展示，可复制详情）
     vault_flags: Vec<bool>,
     vault_count: usize,
     page: Page,
@@ -228,6 +229,7 @@ impl VaultApp {
             tx,
             rx,
             logs: Vec::new(),
+            last_error: None,
             vault_flags: Vec::new(),
             vault_count: 0,
             page: Page::Disguise,
@@ -242,7 +244,12 @@ impl VaultApp {
     }
 
     fn log(&mut self, line: &str) {
-        self.logs.push(format!("[{}] {}", now_hms(), line));
+        let full = format!("[{}] {}", now_hms(), line);
+        // P2：错误独立成卡片，不再只沉在日志里
+        if full.contains("失败") || full.contains("未处理") || full.contains("错误") {
+            self.last_error = Some(full.clone());
+        }
+        self.logs.push(full);
         if self.logs.len() > 800 {
             self.logs.remove(0);
         }
@@ -326,6 +333,7 @@ impl VaultApp {
         if !self.passphrase.is_empty() {
             paths::pass_tip_touch();
         }
+        self.last_error = None;
         let items = self.items.clone();
         let shell = SHELLS[self.shell];
         let shell_name = SHELL_NAMES[self.shell];
@@ -388,6 +396,7 @@ impl VaultApp {
             self.dec_origin = None;
             self.log("已放弃上一次的解密预览。");
         }
+        self.last_error = None;
         let vaults: Vec<PathBuf> = self
             .items
             .iter()
@@ -1140,6 +1149,7 @@ impl VaultApp {
                     ui.add_space(4.0);
                 }
 
+                error_card(ui, &mut self.last_error);
                 log_card(ui, self.busy, self.progress, &self.logs);
             });
     }
@@ -1252,6 +1262,7 @@ impl VaultApp {
     }
     /// 统一的保险箱任务派发：设阶段名 → 置忙 → 交后台线程（会话经通道传回）。
     fn start_vault(&mut self, task: VaultTask, stage: &str) {
+        self.last_error = None;
         self.vp.stage = stage.to_string();
         let sess = self.vp.session.take();
         self.vp.busy = true;
@@ -1464,6 +1475,7 @@ impl VaultApp {
                 );
             });
         ui.add_space(10.0);
+        error_card(ui, &mut self.last_error);
         log_panel(ui, &self.logs);
     }
 
@@ -2140,6 +2152,7 @@ impl VaultApp {
                 }
 
                 ui.add_space(10.0);
+                error_card(ui, &mut self.last_error);
                 log_panel(ui, &self.logs);
             });
         self.ui_vault_editors(ctx);
@@ -2585,6 +2598,42 @@ fn log_card(ui: &mut egui::Ui, busy: bool, progress: Option<u8>, logs: &[String]
         });
 }
 
+/// 错误卡片（P2）：最近一次失败独立成卡片，含「复制详情 / 知道了」。
+/// 失败不再只写进日志——用户不必翻日志才能看懂发生了什么。
+fn error_card(ui: &mut egui::Ui, err: &mut Option<String>) {
+    let Some(msg) = err.clone() else {
+        return;
+    };
+    egui::Frame::default()
+        .fill(CARD)
+        .stroke(egui::Stroke::new(1.0_f32, DANGER))
+        .rounding(8.0)
+        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    egui::RichText::new("上一步失败")
+                        .size(11.5)
+                        .strong()
+                        .color(DANGER),
+                );
+                ui.label(egui::RichText::new(msg.clone()).size(11.0).color(TEXT));
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if ui.add(b_ghost("复制详情")).clicked() {
+                    ui.output_mut(|o| o.copied_text = msg.clone());
+                }
+                if ui.add(b_ghost("知道了")).clicked() {
+                    *err = None;
+                }
+            });
+        });
+    ui.add_space(8.0);
+}
+
 /// 日志面板（P0-5）：折叠收起，不再和进度条挤在同一个卡片里。
 fn log_panel(ui: &mut egui::Ui, logs: &[String]) {
     egui::CollapsingHeader::new(
@@ -2894,7 +2943,12 @@ impl eframe::App for VaultApp {
             }
             Page::Vault => self.ui_vault(ctx),
         }
-        ctx.request_repaint();
+        // P2：忙时每帧重绘保证进度实时；空闲时降频，避免空转烧 CPU
+        if self.busy || self.vp.busy {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
     }
 }
 
