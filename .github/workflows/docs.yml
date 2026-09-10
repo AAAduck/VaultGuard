@@ -1,9 +1,15 @@
 name: Deploy Docs (GitHub Pages)
 
 # 部署文档站（docs/ 单页）到 GitHub Pages。
-# 首次运行由 configure-pages 的 enablement 自动启用 Pages（Source=GitHub Actions），
-# 无需再去 Settings → Pages 手动设置；私有仓库需 GitHub Pro 及以上才可用 Pages。
-# 注意：paths 含本文件自身，因此改动本 workflow 也会触发一次部署（便于自验）。
+#
+# 首次启用（一次性，已在本仓库完成）二选一：
+#   a) 网页 Settings → Pages → Source 选 "GitHub Actions"；
+#   b) 用带 admin 权限的令牌调 POST /repos/{owner}/{repo}/pages -d '{"build_type":"workflow"}'。
+# 注意：workflow 内的 GITHUB_TOKEN 只有 pages: write，**不足以创建 Pages site**
+#   （会报 "Resource not accessible by integration"），因此 configure-pages 的
+#   enablement 只能作兜底（站点已存在时跳过创建），不能替代首次启用动作。
+# 私有仓库需 GitHub Pro 及以上才可用 Pages；本仓库为公开仓库，免费可用。
+# paths 含本文件自身：改动本 workflow 也会触发一次部署（便于自验）。
 on:
   push:
     branches: [main]
