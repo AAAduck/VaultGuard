@@ -18,15 +18,16 @@ scoop/VaultGuard.json                              # Scoop 清单（含 checkver
 
 ### Scoop（零门槛，可先上）
 
-Scoop 对清单无签名要求，任选一条：
+Scoop 对清单无签名要求，当前状态与可选动作：
 
-1. **提交到官方 bucket（ScoopInstaller/Extras）**：
-   - 把 `VaultGuard.json` 放入 `bucket/VaultGuard.json`，向
-     https://github.com/ScoopInstaller/Extras 发起 PR；
-   - 合入后 `scoop bucket add extras; scoop install vaultguard`（注意
-     bucket 内文件名即应用名，官方 Extras 统一小写）；
-2. **自有 bucket**：把清单放进自己的 bucket 仓库，用户执行
-   `scoop bucket add <你的bucket> <仓库URL>` 后即可安装。
+2. **自有 bucket（已就绪，2026-09-11）**：<https://github.com/AAAduck/scoop-bucket>
+   —— 用户执行 `scoop bucket add aaaduck https://github.com/AAAduck/scoop-bucket`
+   后 `scoop install vaultguard` 即可安装；仓库内 `bucket/VaultGuard.json` 与本目录
+   `scoop/VaultGuard.json` 保持同步（改版本/哈希时两处一起改）。
+3. **提交到官方 bucket（ScoopInstaller/Extras）**：清单进 `bucket/VaultGuard.json`，
+   向 https://github.com/ScoopInstaller/Extras 发起 PR；合入后
+   `scoop bucket add extras; scoop install vaultguard`（bucket 内文件名即应用名，
+   官方 Extras 统一小写）。
 
 `checkver` 会自动跟踪 GitHub 最新 Release，`autoupdate` 会在新版本发布后
 由 Excavator 自动生成更新 PR，日常维护只靠打 tag。

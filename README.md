@@ -47,7 +47,8 @@
 | 方式 | 命令 / 步骤 | 状态 |
 | --- | --- | --- |
 | 手动下载（推荐） | 到 [GitHub Releases](https://github.com/AAAduck/VaultGuard/releases) 下载 `VaultGuard.exe`，并下载同目录的 `SHA256SUMS` 校验完整性（PowerShell：`Get-FileHash .\VaultGuard.exe -Algorithm SHA256`） | ✅ 可用 |
-| Scoop | `scoop install vaultguard`（清单在 `distrib/scoop/`，含自动更新） | 🚧 待上架 |
+| Scoop（自有 bucket） | `scoop bucket add aaaduck https://github.com/AAAduck/scoop-bucket` 然后 `scoop install vaultguard`（含 `checkver` 自动更新） | ✅ 可用 |
+| Scoop（官方 Extras） | `scoop install vaultguard`；清单在 `distrib/scoop/` | 🚧 待上游收录 |
 | winget | `winget install AAAduck.VaultGuard`（清单在 `distrib/winget/`） | 🚧 待代码签名后上架 |
 
 更新 = 下载新版 exe 替换旧文件（官方发行件由 CI 构建，每次打 tag 自动生成，版本号/公司信息内嵌）。上架与提交指引见 `distrib/README.md`。
@@ -86,7 +87,7 @@
 开源（MIT），源码、构建配置、测试全部公开，任何人可自行构建比对产物哈希。格式规范、威胁模型等见[文档站](https://AAAduck.github.io/VaultGuard/)。
 
 **Q：怎么安装和更新？**
-单文件免安装：下载 exe 即用，更新即下载新版本替换。也可用 Scoop 管理（`scoop install vaultguard`，待上架）；详见上「安装方式」一节。
+单文件免安装：下载 exe 即用，更新即下载新版本替换。也可用 Scoop 管理：`scoop bucket add aaaduck https://github.com/AAAduck/scoop-bucket` 后 `scoop install vaultguard`（详见上「安装方式」一节）。
 
 ## 进阶：隐私保险箱（长期整理推荐）
 

@@ -241,8 +241,9 @@
   <p>官方发行件由 GitHub Actions CI 构建，版本号/公司信息内嵌；每次打 tag 自动生成 Release。</p>
 
   <h3>Scoop</h3>
-  <p>清单已就绪（<code>distrib/scoop/VaultGuard.json</code>，含自动更新配置），提交到 <a href="https://github.com/ScoopInstaller/Extras" target="_blank" rel="noopener">ScoopInstaller/Extras</a> 或自有 bucket 后即可：</p>
-  <pre><code>scoop install vaultguard</code></pre>
+  <pre><code>scoop bucket add aaaduck https://github.com/AAAduck/scoop-bucket
+scoop install vaultguard</code></pre>
+  <p>自有 bucket 已可用（<a href="https://github.com/AAAduck/scoop-bucket" target="_blank" rel="noopener">AAAduck/scoop-bucket</a>，清单带 <code>checkver</code> 自动跟随新版本）；收录进 <a href="https://github.com/ScoopInstaller/Extras" target="_blank" rel="noopener">ScoopInstaller/Extras</a> 后可省略第一行。仓库内清单在 <code>distrib/scoop/VaultGuard.json</code>。</p>
 
   <h3>winget</h3>
   <p>清单已就绪（<code>distrib/winget/</code>，portable 单文件），上架 microsoft/winget-pkgs 需要清单代码签名，随项目代码签名决策落地。</p>
