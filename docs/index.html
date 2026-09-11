@@ -251,7 +251,7 @@
 <section id="build">
   <h2>构建与安全审计</h2>
   <ul>
-    <li><strong>测试</strong>：<code>cargo test --release</code> —— 40 个自动化测试，覆盖既有容器与保险箱功能，以及 VGS2 向量、追加索引、损坏回退、压缩、VGS1 升级与段级并行加密/分批转发；</li>
+    <li><strong>测试</strong>：<code>cargo test --release</code> —— 42 个自动化测试，覆盖既有容器与保险箱功能，以及 VGS2 向量、追加索引、损坏回退、压缩（含增量段级 GC 的段回收与复用）、VGS1 升级与段级并行加密/分批转发；</li>
     <li><strong>依赖审计</strong>：<code>cargo audit</code> 每周定时在 CI 自动运行，Cargo.lock 变更时也会触发；</li>
     <li><strong>性能基准</strong>：<code>tools/run_vgs2_bench.ps1</code> + <code>vgs2-bench</code>（本机跑，CI 不跑）；目标档（1 万文件 / 5GiB）实测：打开 0.18s、首次保存 20s、全量压缩 26s、VGS1 升级首存 17s；段级隔离基准 8 线程并行加密 4.2–4.7×（原始数据见 <code>docs/benchmarks/</code>）；</li>
     <li><strong>可复现构建</strong>：源码公开，任何人可自行构建比对产物哈希。</li>
@@ -261,8 +261,9 @@
 <section id="roadmap">
   <h2>后续路线（v2.1+）</h2>
   <ul>
-    <li><strong>性能纵深</strong>：✔ 多段并行加解密（v2.1，突破 GCM 单线程上限：目标档保存 28s→20s、压缩 52s→26s）、增量段级 GC（删除大文件只重写所在段，待做）；</li>
-    <li><strong>分发与信任</strong>：代码签名（消除 SmartScreen 冷启动警告）、winget / Scoop 上架、公开格式规范文档；</li>
+    <li><strong>性能纵深</strong>：✔ 多段并行加解密（v2.1，突破 GCM 单线程上限：目标档保存 28s→20s、压缩 52s→26s）、✔ <strong>增量段级 GC</strong>（v2.2，代码已落地未发布：压缩只重写含已删除内容的段，目标档 34s→19.4s）；</li>
+    <li><strong>界面</strong>：✔ 界面重构（P0/P1 + P2 第一批：操作分层、列表搜索/目录树/多选/快捷键、错误卡片）；剩余（长任务可取消、窄窗口适配、高 DPI 回归）待排期；</li>
+    <li><strong>分发与信任</strong>：代码签名（消除 SmartScreen 冷启动警告）、winget / Scoop 上架、公开格式规范文档 ✔（<a href="format.html">字节级规范</a>）；</li>
     <li><strong>产品项</strong>：多语言（英文）、安装版 + 右键菜单集成；</li>
     <li><strong>生态</strong>：第三方安全审计、跨平台只读/导出命令行工具（macOS / Linux）；</li>
     <li><strong>不做</strong>：对抗扫描、云同步 / 账号 / 遥测、密码管理器扩张。</li>
