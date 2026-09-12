@@ -9,6 +9,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use eframe::egui;
 use egui::Color32;
 
+use crate::cancel::{self, Cancel};
 use crate::crypto;
 use crate::engine;
 use crate::paths;
@@ -101,6 +102,8 @@ struct VaultApp {
     dec_origin: Option<PathBuf>, // 预览对应的源文件路径（用于日志展示）
     // 任务栏标题状态跟踪：避免每帧重复发送 ViewportCommand::Title
     title_busy: bool,
+    /// 伪装页后台任务共享的取消令牌（加密/还原/落位期间有效）。
+    enc_cancel: Option<Cancel>,
     // 口令到期提醒（90 天）
     pass_tip_due: bool,
     // 活跃标记心跳节流（保险箱会话/解密预览存在时每 30s 刷新一次）
@@ -132,6 +135,8 @@ struct VaultPage {
     stage: String,          // 底部状态栏的阶段名
     confirm_remove: bool,   // 「移除」就地确认条
     confirm_compact: bool,  // 「压缩」就地确认条
+    /// 当前后台任务共享的取消令牌（新建/打开等不涉及会话的任务为 None）。
+    cancel: Option<Cancel>,
     tx: Sender<VMsg>,
     rx: Receiver<VMsg>,
 }
@@ -162,6 +167,7 @@ impl VaultPage {
             stage: String::new(),
             confirm_remove: false,
             confirm_compact: false,
+            cancel: None,
             tx,
             rx,
         }
@@ -238,6 +244,7 @@ impl VaultApp {
             dec_sel: HashSet::new(),
             dec_origin: None,
             title_busy: false,
+            enc_cancel: None,
             pass_tip_due: paths::pass_tip_due(),
             hb_last: std::time::Instant::now(),
         }
@@ -261,16 +268,23 @@ impl VaultApp {
                 Msg::Line(line) => self.log(&line),
                 Msg::Pct(p) => self.progress = Some(p),
                 Msg::Done(path) => {
+                    let cancelled = self.enc_cancel.as_ref().is_some_and(|c| c.is_cancelled());
                     self.busy = false;
                     self.progress = None;
+                    self.enc_cancel = None;
                     if let Some(p) = path {
                         self.last_output = Some(p);
                     }
-                    self.log("后台任务已结束，可继续操作。");
+                    self.log(if cancelled {
+                        "已取消：本次操作未提交，原文件与已有产物保持原状。"
+                    } else {
+                        "后台任务已结束，可继续操作。"
+                    });
                 }
                 Msg::PreviewReady(preview) => {
                     self.busy = false;
                     self.progress = None;
+                    self.enc_cancel = None;
                     // 解密预览就绪：存入 dec_preview 等待用户勾选落位
                     let tops = engine::top_entries(&preview.manifest);
                     let n = tops.len();
@@ -295,8 +309,10 @@ impl VaultApp {
                 VMsg::Line(line) => self.log(&line),
                 VMsg::Pct(p) => self.progress = Some(p),
                 VMsg::Done(res, sess) => {
+                    let cancelled = sess.as_ref().is_some_and(|s| s.is_cancelled());
                     self.vp.busy = false;
                     self.progress = None;
+                    self.vp.cancel = None;
                     self.vp.session = sess;
                     self.vp.legacy_upgrade_ack = !self
                         .vp
@@ -304,6 +320,9 @@ impl VaultApp {
                         .as_ref()
                         .is_some_and(|s| s.is_legacy_v1());
                     match res {
+                        _ if cancelled => self.log(
+                            "已取消：本次操作未写入容器，保险箱内容保持原状（会话仍可继续使用）。",
+                        ),
                         Ok(msg) => self.log(&format!("完成：{}", msg)),
                         Err(e) => self.log(&format!("失败：{}", e)),
                     }
@@ -350,6 +369,8 @@ impl VaultApp {
         let use_pass = matches!(opts.key_src, engine::KeySource::Passphrase(_));
         let custom_cover = opts.cover.is_some();
         let tx = self.tx.clone();
+        let cancel = Cancel::new();
+        self.enc_cancel = Some(cancel.clone());
         self.busy = true;
         self.log(&format!(
             ">>> 加密 {} 项（外壳 {}，{}，封面 {}）…",
@@ -371,7 +392,7 @@ impl VaultApp {
                 };
                 let _ = tx.send(Msg::Pct(pct));
             };
-            match engine::do_enc(&items, shell, &out_dir, &opts, Some(&prog)) {
+            match engine::do_enc_c(&items, shell, &out_dir, &opts, Some(&prog), &cancel) {
                 Ok((o, n, s)) => {
                     let _ = tx.send(Msg::Line(format!("完成: {}", o.display())));
                     let _ = tx.send(Msg::Line(format!("   {} 项，明文 {}", n, paths::sz(s))));
@@ -414,6 +435,8 @@ impl VaultApp {
         if vaults.len() == 1 {
             let v = vaults[0].clone();
             let tx = self.tx.clone();
+            let cancel = Cancel::new();
+            self.enc_cancel = Some(cancel.clone());
             self.busy = true;
             self.dec_origin = Some(v.clone());
             self.log(&format!(">>> 解密 {}（认证后可勾选落位）…", v.display()));
@@ -426,9 +449,16 @@ impl VaultApp {
                     };
                     let _ = tx.send(Msg::Pct(pct));
                 };
-                match engine::do_dec_preview(&v, pass.as_deref(), Some(&prog)) {
+                match engine::do_dec_preview_c(&v, pass.as_deref(), Some(&prog), &cancel) {
                     Ok(preview) => {
                         let _ = tx.send(Msg::PreviewReady(preview));
+                    }
+                    Err(e) if cancel::is_cancel_msg(&e) => {
+                        let _ = tx.send(Msg::Line(format!(
+                            "已取消：{} 未落位，未产生任何明文输出。",
+                            v.display()
+                        )));
+                        let _ = tx.send(Msg::Done(None));
                     }
                     Err(e) => {
                         let _ = tx.send(Msg::Line(format!("失败 {}: {}", v.display(), e)));
@@ -441,6 +471,8 @@ impl VaultApp {
 
         // 多文件：全量还原（保持原行为）
         let tx = self.tx.clone();
+        let cancel = Cancel::new();
+        self.enc_cancel = Some(cancel.clone());
         self.busy = true;
         self.log(&format!(">>> 还原 {} 个加密文件…", vaults.len()));
         std::thread::spawn(move || {
@@ -456,7 +488,13 @@ impl VaultApp {
             let mut ok = 0;
             let mut fail = 0;
             for v in &vaults {
-                match engine::do_dec(v, &out_dir, pass.as_deref(), Some(&prog)) {
+                if cancel.is_cancelled() {
+                    let _ = tx.send(Msg::Line(
+                        "已取消：剩余文件未处理，已完成的产物保持有效。".to_string(),
+                    ));
+                    break;
+                }
+                match engine::do_dec_c(v, &out_dir, pass.as_deref(), Some(&prog), &cancel) {
                     Ok(res) => {
                         ok += 1;
                         let _ = tx.send(Msg::Line(format!(
@@ -498,6 +536,10 @@ impl VaultApp {
                             )));
                         }
                     }
+                    Err(e) if cancel::is_cancel_msg(&e) => {
+                        let _ = tx.send(Msg::Line(format!("已取消（{} 处理中止）。", v.display())));
+                        break;
+                    }
                     Err(e) => {
                         fail += 1;
                         let _ = tx.send(Msg::Line(format!("失败 {}: {}", v.display(), e)));
@@ -538,6 +580,8 @@ impl VaultApp {
         let out_dir = PathBuf::from(self.out_dir.trim());
         let origin = self.dec_origin.clone();
         let tx = self.tx.clone();
+        let cancel = Cancel::new();
+        self.enc_cancel = Some(cancel.clone());
         self.busy = true;
         self.dec_sel.clear();
         let label = match &filter {
@@ -546,7 +590,7 @@ impl VaultApp {
         };
         self.log(&format!(">>> {}…", label));
         std::thread::spawn(move || {
-            let res = engine::do_dec_place(preview, &out_dir, filter.as_deref());
+            let res = engine::do_dec_place_c(preview, &out_dir, filter.as_deref(), &cancel);
             match res {
                 Ok(r) => {
                     let _ = tx.send(Msg::Line(format!(
@@ -569,6 +613,12 @@ impl VaultApp {
                         )));
                     }
                     let _ = tx.send(Msg::Done(Some(r.dst)));
+                }
+                Err(e) if cancel::is_cancel_msg(&e) => {
+                    let _ = tx.send(Msg::Line(
+                        "已取消：未落位任何内容，临时明文已擦除。".to_string(),
+                    ));
+                    let _ = tx.send(Msg::Done(None));
                 }
                 Err(e) => {
                     let _ = tx.send(Msg::Line(format!("落位失败: {}", e)));
@@ -1150,7 +1200,7 @@ impl VaultApp {
                 }
 
                 error_card(ui, &mut self.last_error);
-                log_card(ui, self.busy, self.progress, &self.logs);
+                log_card(ui, self.busy, self.progress, &self.logs, self.enc_cancel.as_ref());
             });
     }
 
@@ -1265,6 +1315,12 @@ impl VaultApp {
         self.last_error = None;
         self.vp.stage = stage.to_string();
         let sess = self.vp.session.take();
+        // 会话自带的取消令牌就是后台任务的可中断点；新建/打开等无会话任务不可取消。
+        let c = sess.as_ref().map(|s| s.cancel_flag());
+        if let Some(c) = &c {
+            c.reset();
+        }
+        self.vp.cancel = c;
         self.vp.busy = true;
         let tx = self.vp.tx.clone();
         std::thread::spawn(move || vault_worker(sess, task, tx));
@@ -1403,6 +1459,7 @@ impl VaultApp {
         let busy = self.vp.busy;
         let progress = self.progress;
         let stage = self.vp.stage.clone();
+        let cancel = self.vp.cancel.clone();
         let tail = self.logs.last().cloned().unwrap_or_default();
         egui::TopBottomPanel::bottom("vault_status")
             .frame(
@@ -1428,6 +1485,10 @@ impl VaultApp {
                                     .desired_width(180.0)
                                     .show_percentage(),
                             );
+                        }
+                        if let Some(c) = &cancel {
+                            ui.add_space(6.0);
+                            cancel_button(ui, c);
                         }
                         ui.label(
                             egui::RichText::new("期间请勿断电或关闭程序")
@@ -2554,7 +2615,13 @@ enum RowAction {
     Remove,
 }
 
-fn log_card(ui: &mut egui::Ui, busy: bool, progress: Option<u8>, logs: &[String]) {
+fn log_card(
+    ui: &mut egui::Ui,
+    busy: bool,
+    progress: Option<u8>,
+    logs: &[String],
+    cancel: Option<&Cancel>,
+) {
     egui::Frame::default()
         .fill(CARD)
         .stroke(egui::Stroke::new(1.0_f32, BORDER))
@@ -2571,6 +2638,10 @@ fn log_card(ui: &mut egui::Ui, busy: bool, progress: Option<u8>, logs: &[String]
                             .size(11.5)
                             .color(BUSY_AMBER),
                     );
+                    if let Some(c) = cancel {
+                        ui.add_space(6.0);
+                        cancel_button(ui, c);
+                    }
                 }
                 if let Some(p) = progress {
                     ui.add(
@@ -2711,6 +2782,27 @@ fn b_ghost(text: &str) -> egui::Button<'static> {
         .stroke(egui::Stroke::new(1.0_f32, BORDER))
         .rounding(7.0)
         .min_size(egui::vec2(0.0, BTN_H))
+}
+
+/// 状态条内的紧凑「取消」按钮：已请求取消时退化为文字提示。
+/// 点击只是置位令牌，长任务在下一个检查点停下，容器与已有产物保持原状。
+fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
+    if c.is_cancelled() {
+        ui.label(egui::RichText::new("正在取消…").size(11.0).color(DANGER));
+        return;
+    }
+    let btn = egui::Button::new(egui::RichText::new("取消").size(11.5).color(TEXT_SUB))
+        .fill(Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+        .rounding(6.0)
+        .min_size(egui::vec2(52.0, 22.0));
+    if ui
+        .add(btn)
+        .on_hover_text("在当前检查点停下；容器与已有产物保持原状")
+        .clicked()
+    {
+        c.cancel();
+    }
 }
 
 fn primary_button(text: impl Into<String>) -> egui::Button<'static> {

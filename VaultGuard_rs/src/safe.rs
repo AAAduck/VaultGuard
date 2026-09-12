@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::cancel::Cancel;
 use crate::crypto::{ct_eq, derive_v3, ArgonParams, Gcm, NONCE_SZ, TAG_SZ};
 use crate::paths::{cleanup, mktmpdir, safe_name, uniq};
 use crate::profile;
@@ -93,6 +94,9 @@ pub struct Session {
     /// 最近一次段级 GC 的统计 (全死段跳过数, 纯活段整段复用数, 输出数据段数)。
     /// 仅 `compact_incremental` 更新；其余保存路径维持上一次的值。
     pub gc_stats: (usize, usize, usize),
+    /// 长任务取消令牌。GUI 持有一份克隆；点「取消」后各长任务在下一个检查点
+    /// 以 `Interrupted` 返回，**容器与磁盘内容保持原状**，会话仍可继续使用。
+    cancel: Cancel,
 }
 
 impl Drop for Session {
@@ -122,6 +126,7 @@ pub fn create(path: &Path, pass: &str) -> io::Result<Session> {
         dirty: true,
         next_stage: 1,
         gc_stats: (0, 0, 0),
+        cancel: Cancel::new(),
     };
     if let Err(e) = s.save(&|_| {}) {
         return Err(e);
@@ -194,6 +199,7 @@ fn open_v2(path: &Path, pass: &str) -> io::Result<Session> {
         dirty: false,
         next_stage: 1,
         gc_stats: (0, 0, 0),
+        cancel: Cancel::new(),
     };
     s.refresh_entries();
     Ok(s)
@@ -225,6 +231,7 @@ fn open_v1(path: &Path, pass: &str) -> io::Result<Session> {
             dirty: false,
             next_stage: 1,
             gc_stats: (0, 0, 0),
+            cancel: Cancel::new(),
         };
         s.refresh_entries();
         Ok(s)
@@ -246,6 +253,16 @@ impl Session {
                 is_dir: n.is_dir,
             })
             .collect();
+    }
+
+    /// 取一份取消令牌克隆，供 UI 与后台线程共享（点「取消」即置位）。
+    pub fn cancel_flag(&self) -> Cancel {
+        self.cancel.clone()
+    }
+
+    /// 本次会话的长任务是否已被取消。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 
     /// 刷新活跃标记（GUI 每 30 秒调用）。
@@ -276,6 +293,7 @@ impl Session {
         // 单独拖入的 A/x.txt 在本批次内撞名）。
         let mut pending: BTreeSet<String> = BTreeSet::new();
         for src in srcs {
+            self.cancel.check()?; // 可中断点：每收集一项之前
             if !src.exists() {
                 continue;
             }
@@ -318,7 +336,7 @@ impl Session {
             self.next_stage = self.next_stage.wrapping_add(1).max(1);
             let adds_dir = self.staged.join("adds");
             let tars = profile::phase("stage-pack", || {
-                tarx::pack_split_tars(&pack_items, SEG_TARGET, &adds_dir, tag)
+                tarx::pack_split_tars_c(&pack_items, SEG_TARGET, &adds_dir, tag, &self.cancel)
             })?;
             // item_idx -> 所属 tar
             let mut item_to_tar: Vec<Option<PathBuf>> = vec![None; pack_items.len()];
@@ -509,6 +527,8 @@ impl Session {
             Storage::V2 { key, segments, manifest_count } => (*key, segments.clone(), *manifest_count),
             _ => unreachable!(),
         };
+        // 取消令牌取本地克隆，闭包内检查不与 self 的其它借用冲突。
+        let cancel = self.cancel.clone();
         let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let end = logical_end(&prior)?;
         // 上次崩溃的半段不属于已提交版本，可安全截掉；旧 manifest 仍在 end 之前。
@@ -542,6 +562,7 @@ impl Session {
                 // 暂存 tar 内容已是「该段明文」，直接进并行加密队列；
                 // 超过 PARALLEL_MEM_CAP 的段（单个超大文件）走流式串行，避免整段进内存。
                 for (tar, arcs) in &staged_tars {
+                    cancel.check()?; // 可中断点：每写一个数据段之前
                     let sz = std::fs::metadata(tar).map(|m| m.len()).unwrap_or(0);
                     if sz <= PARALLEL_MEM_CAP {
                         // 暂存 tar 内容已是「该段明文」，读入内存后进并行加密队列
@@ -569,6 +590,7 @@ impl Session {
             }
             segments.extend(metas);
         }
+        cancel.check()?; // 可中断点：manifest 落盘前
         let manifest = make_manifest_for(&committed_nodes)?;
         if manifest.len() as u64 > vgs2::MAX_MANIFEST_LEN {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "manifest 超出打开安全上限"));
@@ -601,6 +623,8 @@ impl Session {
         let tmp = self.path.with_extension("vgsafe.tmp");
         cleanup(&tmp);
         let work = mktmpdir();
+        // 取消令牌取本地克隆；取消时丢弃 tmp 与 work，原容器一个字节都不动。
+        let cancel = self.cancel.clone();
         let result = (|| -> io::Result<([u8; 32], Vec<vgs2::SegmentMeta>, BTreeMap<String, Node>)> {
             // 分组：已落盘条目按数据段归类（转发）；暂存条目按暂存 tar 归类（整段直用）；
             // 旧格式条目由保留的明文 tar 整段转发。不再物化整棵明文树 ——
@@ -654,6 +678,7 @@ impl Session {
                     //    只驻留到该波转发结束，避免整箱明文同时落盘。
                     let seg_list: Vec<(u64, Vec<(String, String)>)> = seg_groups.into_iter().collect();
                     for chunk in seg_list.chunks(workers.max(1)) {
+                        cancel.check()?; // 可中断点：每波数据段转发之前
                         let payloads = decrypt_wave(chunk, &seg_map, old_key, &work, &container)?;
                         for (_, payload, wanted) in &payloads {
                             let n = sink.relay(payload, wanted)?;
@@ -674,6 +699,7 @@ impl Session {
                     }
                     // 3) 暂存 tar：内容即该段明文，直接攒批并行加密
                     for (tar, arcs) in staged_arcs {
+                        cancel.check()?; // 可中断点：每写一个暂存段之前
                         let sz = std::fs::metadata(&tar).map(|m| m.len()).unwrap_or(0);
                         if sz <= PARALLEL_MEM_CAP {
                             let data = std::fs::read(&tar)?;
@@ -707,6 +733,7 @@ impl Session {
                     node.source = Source::Dir;
                 }
             }
+            cancel.check()?; // 可中断点：manifest 落盘前
             let manifest = make_manifest_for(&new_nodes)?;
             let ms = profile::phase("manifest-write", || {
                 vgs2::append_stream_segment(
@@ -772,6 +799,8 @@ impl Session {
         cleanup(&tmp);
         let work = mktmpdir();
         let container = self.path.clone();
+        // 取消令牌取本地克隆；取消时丢弃 tmp 与 work，原容器一个字节都不动。
+        let cancel = self.cancel.clone();
         let result = (|| -> io::Result<(Vec<vgs2::SegmentMeta>, BTreeMap<String, Node>)> {
             // 存活条目按源段分组；未被引用的数据段就是可整段回收的垃圾。
             let mut seg_groups: BTreeMap<u64, Vec<(String, String)>> = BTreeMap::new();
@@ -811,6 +840,7 @@ impl Session {
                 let (arc_to_seg, metas, next_after) = profile::phase("gc-write", || {
                     let mut sink = SegSink::new(&mut f, key, 1, work.join("batches"), workers);
                     for (a, b) in gc_waves(&list, &seg_map, workers) {
+                        cancel.check()?; // 可中断点：每波段回收之前
                         let wave = decrypt_wave_gc(&list[a..b], &seg_map, key, &work, &container)?;
                         for payload in wave {
                             let arcs: Vec<String> =
@@ -871,6 +901,7 @@ impl Session {
                     node.source = Source::Dir;
                 }
             }
+            cancel.check()?; // 可中断点：manifest 落盘前
             let manifest = make_manifest_for(&new_nodes)?;
             let ms = profile::phase("manifest-write", || {
                 vgs2::append_stream_segment(
@@ -938,6 +969,7 @@ impl Session {
             }
         }
         for (tar, wanted) in tar_groups {
+            self.cancel.check()?; // 可中断点：每解一个暂存 tar 之前
             let n = tarx::extract_files(&tar, &wanted)?;
             if n != wanted.len() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "暂存 tar 缺少所列条目"));
@@ -954,6 +986,7 @@ impl Session {
         // 先解出本波全部明文（认证通过才算数），全员成功后再统一提取，避免半认证部分落位。
         let group_list: Vec<(u64, Vec<(String, PathBuf)>)> = groups.into_iter().collect();
         for chunk in group_list.chunks(workers.max(1)) {
+            self.cancel.check()?; // 可中断点：每波数据段解密之前
             let mut payloads: Vec<(u64, PathBuf)> = Vec::with_capacity(chunk.len());
             std::thread::scope(|scope| -> io::Result<()> {
                 let mut handles = Vec::with_capacity(chunk.len());

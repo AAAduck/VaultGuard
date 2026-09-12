@@ -12,6 +12,7 @@ use crate::crypto::{
     aad_for, ct_eq, derive_v1, derive_v2, derive_v3, ArgonParams, Gcm, FMT_V1, FMT_V2, FMT_V3,
     KDF_ARGON2ID, NONCE_SZ, TAG_SZ,
 };
+use crate::cancel::Cancel;
 use crate::crypto::{ARGON_SALT_SZ, SALT_SZ};
 use crate::paths::{cleanup, mktmpdir, random_out_name, safe_name, uniq};
 use crate::shells::{self, Ev as EncEv, Sink};
@@ -147,6 +148,19 @@ pub fn stream_decrypt(
     pass: Option<&str>,
     on_progress: Option<&ProgressFn<'_>>,
 ) -> io::Result<u64> {
+    stream_decrypt_c(shell, path, tp, pass, on_progress, &Cancel::never())
+}
+
+/// [`stream_decrypt`] 的可取消版：每消费一个密文块检查一次取消令牌。
+/// 取消时明文 tar 只写到一半，由调用方 `cleanup` 擦除。
+pub fn stream_decrypt_c(
+    shell: &str,
+    path: &Path,
+    tp: &Path,
+    pass: Option<&str>,
+    on_progress: Option<&ProgressFn<'_>>,
+    cancel: &Cancel,
+) -> io::Result<u64> {
     let mut dec: Option<Gcm> = None;
     let mut fmt: &'static [u8; 3] = FMT_V2;
     let mut saw_head = false;
@@ -232,6 +246,7 @@ pub fn stream_decrypt(
                 }
             }
             EncEv::D(c) => {
+                cancel.check()?; // 可中断点：每个密文块之间
                 let g = dec
                     .as_mut()
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "数据顺序异常"))?;
@@ -331,6 +346,19 @@ pub fn do_enc(
     opts: &EncOptions,
     on_progress: Option<&ProgressFn<'_>>,
 ) -> Result<(PathBuf, usize, u64), String> {
+    do_enc_c(paths, shell, out_root, opts, on_progress, &Cancel::never())
+}
+
+/// [`do_enc`] 的可取消版。取消通过加密管道的读端注入：读端返回 `Interrupted`
+/// 后打包线程的 channel 写入随即失败并自行退出，半成品产物被删除，原文件不动。
+pub fn do_enc_c(
+    paths: &[PathBuf],
+    shell: &str,
+    out_root: &Path,
+    opts: &EncOptions,
+    on_progress: Option<&ProgressFn<'_>>,
+    cancel: &Cancel,
+) -> Result<(PathBuf, usize, u64), String> {
     let mut valid: Vec<PathBuf> = Vec::new();
     for p in paths {
         if p.exists() {
@@ -394,6 +422,7 @@ pub fn do_enc(
             rx,
             buf: Vec::new(),
             pos: 0,
+            cancel: cancel.clone(),
         };
         let n = enc_streaming(reader, &opts.key_src, sb, sink, Some(total), on_progress)?;
         plain_len.store(n, Ordering::Relaxed);
@@ -472,10 +501,21 @@ pub fn top_entries(manifest: &[(String, u64, bool)]) -> Vec<(String, u64, bool)>
 
 /// 第一阶段：解密 + 认证 + 列清单，不落位。返回 DecPreview 供选择性落位。
 /// pass 供 VG\x03 口令格式使用；v1/v2 传 None。
+#[allow(dead_code)] // 保留不可取消入口（集成测试与库调用方）；二进制内统一走 _c 版
 pub fn do_dec_preview(
     path: &Path,
     pass: Option<&str>,
     on_progress: Option<&ProgressFn<'_>>,
+) -> Result<DecPreview, String> {
+    do_dec_preview_c(path, pass, on_progress, &Cancel::never())
+}
+
+/// [`do_dec_preview`] 的可取消版：认证解密阶段可中断（中止后临时明文被擦除）。
+pub fn do_dec_preview_c(
+    path: &Path,
+    pass: Option<&str>,
+    on_progress: Option<&ProgressFn<'_>>,
+    cancel: &Cancel,
 ) -> Result<DecPreview, String> {
     if !path.is_file() {
         return Err("不是文件".to_string());
@@ -488,7 +528,8 @@ pub fn do_dec_preview(
     let tmp = mktmpdir();
     let tp = tmp.join("payload.tar");
     let result = (|| -> Result<DecPreview, String> {
-        let size = stream_decrypt(shell, path, &tp, pass, on_progress).map_err(|e| e.to_string())?;
+        let size = stream_decrypt_c(shell, path, &tp, pass, on_progress, cancel)
+            .map_err(|e| e.to_string())?;
         let base = safe_name(
             &path
                 .file_name()
@@ -515,12 +556,26 @@ pub fn do_dec_preview(
 /// 第二阶段：从预览落位到 out_root。
 /// filter=None 全量落位；filter=Some 只落位选中的顶层条目。
 /// 消费 preview（内部清理临时目录）。
+#[allow(dead_code)] // 保留不可取消入口（集成测试与库调用方）；二进制内统一走 _c 版
 pub fn do_dec_place(
-    mut preview: DecPreview,
+    preview: DecPreview,
     out_root: &Path,
     filter: Option<&[String]>,
 ) -> Result<DecResult, String> {
+    do_dec_place_c(preview, out_root, filter, &Cancel::never())
+}
+
+/// [`do_dec_place`] 的可取消版：落位前后各检查一次（解包本身是原子的一段）。
+pub fn do_dec_place_c(
+    mut preview: DecPreview,
+    out_root: &Path,
+    filter: Option<&[String]>,
+    cancel: &Cancel,
+) -> Result<DecResult, String> {
     let result = (|| -> Result<DecResult, String> {
+        cancel
+            .check()
+            .map_err(|e| e.to_string())?;
         let (dst, n) = match filter {
             None => tarx::place(&preview.tmp_dir, &preview.base, out_root),
             Some(sel) => tarx::place_filtered(&preview.tmp_dir, &preview.base, out_root, sel),
@@ -551,8 +606,19 @@ pub fn do_dec(
     pass: Option<&str>,
     on_progress: Option<&ProgressFn<'_>>,
 ) -> Result<DecResult, String> {
-    let preview = do_dec_preview(path, pass, on_progress)?;
-    do_dec_place(preview, out_root, None)
+    do_dec_c(path, out_root, pass, on_progress, &Cancel::never())
+}
+
+/// [`do_dec`] 的可取消版。
+pub fn do_dec_c(
+    path: &Path,
+    out_root: &Path,
+    pass: Option<&str>,
+    on_progress: Option<&ProgressFn<'_>>,
+    cancel: &Cancel,
+) -> Result<DecResult, String> {
+    let preview = do_dec_preview_c(path, pass, on_progress, cancel)?;
+    do_dec_place_c(preview, out_root, None, cancel)
 }
 
 const HASH_LIMIT: usize = 32; // 最多记录 32 个文件的哈希，防止超大目录刷屏
@@ -607,10 +673,13 @@ struct ChanReader {
     rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
     buf: Vec<u8>,
     pos: usize,
+    /// 读端即加密管道的可中断点：取消后打包线程的 channel 写入随之失败并退出。
+    cancel: Cancel,
 }
 
 impl Read for ChanReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.cancel.check()?;
         while self.pos >= self.buf.len() {
             match self.rx.recv() {
                 Ok(Ok(v)) => {

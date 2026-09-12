@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cancel;
 mod crypto;
 mod engine;
 mod gui;

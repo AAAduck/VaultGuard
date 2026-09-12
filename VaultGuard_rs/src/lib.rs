@@ -1,6 +1,7 @@
 //! 库入口：把核心模块暴露为 lib target，供集成测试（tests/）复用。
 //! 现有二进制入口 main.rs 不受影响。
 
+pub mod cancel;
 pub mod crypto;
 pub mod engine;
 pub mod paths;

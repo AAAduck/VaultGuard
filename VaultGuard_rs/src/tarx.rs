@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+use crate::cancel::Cancel;
 use crate::paths::{safe_name, uniq};
 
 /// 把 srcs 打包为 tar 流写入任意 Write（加密直通管道用，明文不落盘）。
@@ -121,11 +122,24 @@ fn path_data_bytes(p: &Path) -> u64 {
 /// 单个条目超过上限时独占一批）。返回 (tar 路径, 该 tar 包含的条目下标)。
 /// VGS2 批量暂存用：add 时按段大小拆分，保存时各批并行加密为独立数据段。
 /// `tag` 用于区分同一次会话中的多批 add（同目录下避免互相覆盖）。
+#[allow(dead_code)] // 保留不可取消入口（集成测试与库调用方）；二进制内统一走 _c 版
 pub fn pack_split_tars(
     items: &[(PathBuf, String)],
     target: u64,
     dir: &Path,
     tag: u64,
+) -> io::Result<Vec<(PathBuf, Vec<usize>)>> {
+    pack_split_tars_c(items, target, dir, tag, &Cancel::never())
+}
+
+/// [`pack_split_tars`] 的可取消版：每收集一个条目之前检查取消令牌。
+/// 取消时已封尾的暂存 tar 留在 `dir` 内，由会话的 `clear_staged_adds` 统一擦除。
+pub fn pack_split_tars_c(
+    items: &[(PathBuf, String)],
+    target: u64,
+    dir: &Path,
+    tag: u64,
+    cancel: &Cancel,
 ) -> io::Result<Vec<(PathBuf, Vec<usize>)>> {
     std::fs::create_dir_all(dir)?;
     let mut out: Vec<(PathBuf, Vec<usize>)> = Vec::new();
@@ -135,6 +149,7 @@ pub fn pack_split_tars(
     let mut cur_bytes: u64 = 0;
     let mut file_idx: u64 = 0;
     for (i, (src, arc)) in items.iter().enumerate() {
+        cancel.check()?; // 可中断点：每打包一个条目之前
         let sz = path_data_bytes(src);
         if cur.is_some() && cur_bytes > 0 && cur_bytes.saturating_add(sz) > target {
             // 封尾当前 tar
