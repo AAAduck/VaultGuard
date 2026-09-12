@@ -86,7 +86,10 @@ struct Pal {
     border_off: Color32,
     accent: Color32,
     accent_text: Color32,
+    /// 强调色的极淡底（卡片/徽标底，10% 上下）
     accent_dim: Color32,
+    /// 文本选中/拖选高亮（要明显看得出选中范围，比 accent_dim 浓）
+    sel_bg: Color32,
     /// 强调色按钮上的文字
     on_accent: Color32,
     dir_sky: Color32,
@@ -117,6 +120,8 @@ const PAL_DARK: Pal = Pal {
     accent: Color32::from_rgb(0x05, 0x96, 0x69),
     accent_text: Color32::from_rgb(0x6E, 0xE7, 0xB7),
     accent_dim: Color32::from_rgba_premultiplied(2, 19, 13, 26),
+    // accent(#059669) 约 38% 不透明度的预乘值
+    sel_bg: Color32::from_rgba_premultiplied(2, 57, 40, 97),
     on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     dir_sky: Color32::from_rgb(0x38, 0xBD, 0xF8),
     danger: Color32::from_rgb(0xF8, 0x71, 0x71),
@@ -146,6 +151,8 @@ const PAL_LIGHT: Pal = Pal {
     accent_text: Color32::from_rgb(0x04, 0x78, 0x57),
     // = from_rgba_unmultiplied(5,150,105,28) 的预乘等价
     accent_dim: Color32::from_rgba_premultiplied(1, 16, 12, 28),
+    // accent 约 26% 不透明度（白底上够明显，又不盖住黑字）
+    sel_bg: Color32::from_rgba_premultiplied(1, 39, 27, 66),
     on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     dir_sky: Color32::from_rgb(0x02, 0x84, 0xC7),
     danger: Color32::from_rgb(0xDC, 0x26, 0x26),
@@ -852,23 +859,11 @@ impl VaultApp {
                             apply_theme(ctx, target);
                         }
                         ui.add_space(6.0);
-                        if ui
-                            .selectable_label(
-                                matches!(&self.page, Page::Vault),
-                                egui::RichText::new("隐私保险箱").size(12.5),
-                            )
-                            .clicked()
-                        {
-                            self.page = Page::Vault;
-                        }
-                        if ui
-                            .selectable_label(
-                                matches!(&self.page, Page::Disguise),
-                                egui::RichText::new("伪装加密").size(12.5),
-                            )
-                            .clicked()
-                        {
+                        if tab_button(ui, "伪装加密", matches!(&self.page, Page::Disguise)) {
                             self.page = Page::Disguise;
+                        }
+                        if tab_button(ui, "隐私保险箱", matches!(&self.page, Page::Vault)) {
+                            self.page = Page::Vault;
                         }
                     });
                 });
@@ -1644,6 +1639,7 @@ impl VaultApp {
                         if let Some(p) = progress {
                             ui.add(
                                 egui::ProgressBar::new(p as f32 / 100.0)
+                                    .fill(pal().accent)
                                     .desired_height(10.0)
                                     .desired_width(180.0)
                                     .show_percentage(),
@@ -2809,6 +2805,7 @@ fn log_card(
                 if let Some(p) = progress {
                     ui.add(
                         egui::ProgressBar::new(p as f32 / 100.0)
+                            .fill(pal().accent)
                             .desired_height(12.0)
                             .show_percentage(),
                     );
@@ -2982,6 +2979,25 @@ fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(8.0)
         .min_size(egui::vec2(0.0, 32.0))
+}
+
+/// 顶栏页签：选中态用实心强调色 + 白字（默认 selectable_label 的选中态是
+/// 近透明底 + 深绿字，深色主题下几乎读不出来）。
+fn tab_button(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
+    let p = pal();
+    let (fg, bg, stroke) = if selected {
+        (p.on_accent, p.accent, egui::Stroke::NONE)
+    } else {
+        (p.text_sub, Color32::TRANSPARENT, egui::Stroke::new(1.0_f32, p.border))
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).size(12.5).color(fg))
+            .fill(bg)
+            .stroke(stroke)
+            .rounding(7.0)
+            .min_size(egui::vec2(0.0, 26.0)),
+    )
+    .clicked()
 }
 
 fn ghost_button(text: &str) -> egui::Button<'static> {
@@ -3278,7 +3294,8 @@ fn build_style() -> egui::Style {
     v.faint_bg_color = pal().faint_bg;
     v.window_stroke = egui::Stroke::new(1.0_f32, pal().border);
     v.window_rounding = egui::Rounding::same(10.0);
-    v.selection.bg_fill = pal().accent_dim;
+    // 拖选高亮：默认 accent_dim 只有 10% 透明度，选中范围几乎看不出
+    v.selection.bg_fill = pal().sel_bg;
     v.selection.stroke = egui::Stroke::new(1.0_f32, pal().accent);
     v.hyperlink_color = pal().accent_text;
     v.warn_fg_color = pal().busy_amber;
