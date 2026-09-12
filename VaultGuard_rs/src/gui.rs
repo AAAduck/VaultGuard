@@ -25,23 +25,161 @@ const SHELL_DESCS: [&str; 3] = [
 ];
 const SHELL_BADGES: [&str; 3] = ["png", "jpg", "docx"];
 
-// ── zinc/emerald 配色（对齐退役 React 版的 tailwind 令牌）──
-const BG: Color32 = Color32::from_rgb(0x0A, 0x0A, 0x0C);
-const PANEL: Color32 = Color32::from_rgb(0x13, 0x13, 0x16);
-const CARD: Color32 = Color32::from_rgb(0x18, 0x18, 0x1B);
-const CARD_HOVER: Color32 = Color32::from_rgb(0x20, 0x20, 0x24);
-const BORDER: Color32 = Color32::from_rgb(0x2A, 0x2A, 0x2E);
-const TEXT: Color32 = Color32::from_rgb(0xE4, 0xE4, 0xE7);
-const TEXT_SUB: Color32 = Color32::from_rgb(0xA1, 0xA1, 0xAA);
-const TEXT_MUTED: Color32 = Color32::from_rgb(0x71, 0x71, 0x7A);
-const TEXT_FAINT: Color32 = Color32::from_rgb(0x52, 0x52, 0x5B);
-const ACCENT: Color32 = Color32::from_rgb(0x05, 0x96, 0x69);
-const ACCENT_TEXT: Color32 = Color32::from_rgb(0x6E, 0xE7, 0xB7);
-const ACCENT_DIM: Color32 = Color32::from_rgba_premultiplied(2, 19, 13, 26);
-const DIR_SKY: Color32 = Color32::from_rgb(0x38, 0xBD, 0xF8);
-const DANGER: Color32 = Color32::from_rgb(0xF8, 0x71, 0x71);
-const BUSY_AMBER: Color32 = Color32::from_rgb(0xFB, 0xBF, 0x24);
-const LOG_DEFAULT: Color32 = Color32::from_rgb(0x9C, 0x9C, 0xA4);
+// ── 主题与配色：深色 / 浅色两套令牌（对齐退役 React 版的 tailwind 配色）──
+
+/// 界面主题。选择持久化在注册表 `HKCU\Software\VaultGuard\theme`。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThemeMode {
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+    }
+
+    fn parse(s: &str) -> ThemeMode {
+        if s.eq_ignore_ascii_case("light") {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        }
+    }
+
+    fn toggled(self) -> ThemeMode {
+        match self {
+            ThemeMode::Dark => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
+        }
+    }
+
+    /// 按钮文案显示的是「切过去之后的结果」。
+    fn switch_label(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "☀ 浅色",
+            ThemeMode::Light => "☾ 深色",
+        }
+    }
+}
+
+/// 一套配色令牌。字段与旧常量一一对应，浅色只换值不换语义。
+#[derive(Clone, Copy)]
+struct Pal {
+    /// 浅色标记：装配 egui 样式时据此选 light()/dark() 基准
+    is_light: bool,
+    bg: Color32,
+    panel: Color32,
+    card: Color32,
+    card_hover: Color32,
+    border: Color32,
+    text: Color32,
+    text_sub: Color32,
+    text_muted: Color32,
+    text_faint: Color32,
+    /// 禁用态文字：明显变淡但仍看得清（egui 默认会把禁用文字淡到几乎不可见）
+    text_off: Color32,
+    /// 禁用态描边
+    border_off: Color32,
+    accent: Color32,
+    accent_text: Color32,
+    accent_dim: Color32,
+    /// 强调色按钮上的文字
+    on_accent: Color32,
+    dir_sky: Color32,
+    danger: Color32,
+    busy_amber: Color32,
+    /// 提醒卡底色（琥珀色调）
+    warn_bg: Color32,
+    /// 悬停高亮叠加（深色加白、浅色加黑）
+    hover_tint: Color32,
+    log_default: Color32,
+    extreme_bg: Color32,
+    faint_bg: Color32,
+}
+
+const PAL_DARK: Pal = Pal {
+    is_light: false,
+    bg: Color32::from_rgb(0x0A, 0x0A, 0x0C),
+    panel: Color32::from_rgb(0x13, 0x13, 0x16),
+    card: Color32::from_rgb(0x18, 0x18, 0x1B),
+    card_hover: Color32::from_rgb(0x20, 0x20, 0x24),
+    border: Color32::from_rgb(0x2A, 0x2A, 0x2E),
+    text: Color32::from_rgb(0xE4, 0xE4, 0xE7),
+    text_sub: Color32::from_rgb(0xB6, 0xB6, 0xBF),
+    text_muted: Color32::from_rgb(0x8C, 0x8C, 0x96),
+    text_faint: Color32::from_rgb(0x64, 0x64, 0x6D),
+    text_off: Color32::from_rgb(0x7E, 0x7E, 0x88),
+    border_off: Color32::from_rgb(0x26, 0x26, 0x2A),
+    accent: Color32::from_rgb(0x05, 0x96, 0x69),
+    accent_text: Color32::from_rgb(0x6E, 0xE7, 0xB7),
+    accent_dim: Color32::from_rgba_premultiplied(2, 19, 13, 26),
+    on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    dir_sky: Color32::from_rgb(0x38, 0xBD, 0xF8),
+    danger: Color32::from_rgb(0xF8, 0x71, 0x71),
+    busy_amber: Color32::from_rgb(0xFB, 0xBF, 0x24),
+    warn_bg: Color32::from_rgb(0x1D, 0x18, 0x08),
+    // = from_white_alpha(6)（该构造器非 const，展开为预乘值）
+    hover_tint: Color32::from_rgba_premultiplied(6, 6, 6, 6),
+    log_default: Color32::from_rgb(0x9C, 0x9C, 0xA4),
+    extreme_bg: Color32::from_rgb(0x0D, 0x0D, 0x10),
+    faint_bg: Color32::from_rgb(0x14, 0x14, 0x17),
+};
+
+const PAL_LIGHT: Pal = Pal {
+    is_light: true,
+    bg: Color32::from_rgb(0xF4, 0xF5, 0xF7),
+    panel: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    card: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    card_hover: Color32::from_rgb(0xEC, 0xEE, 0xF2),
+    border: Color32::from_rgb(0xD5, 0xD9, 0xE0),
+    text: Color32::from_rgb(0x18, 0x18, 0x1B),
+    text_sub: Color32::from_rgb(0x3F, 0x3F, 0x46),
+    text_muted: Color32::from_rgb(0x60, 0x60, 0x69),
+    text_faint: Color32::from_rgb(0x8C, 0x8C, 0x96),
+    text_off: Color32::from_rgb(0x9C, 0x9C, 0xA6),
+    border_off: Color32::from_rgb(0xE3, 0xE6, 0xEB),
+    accent: Color32::from_rgb(0x05, 0x96, 0x69),
+    accent_text: Color32::from_rgb(0x04, 0x78, 0x57),
+    // = from_rgba_unmultiplied(5,150,105,28) 的预乘等价
+    accent_dim: Color32::from_rgba_premultiplied(1, 16, 12, 28),
+    on_accent: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    dir_sky: Color32::from_rgb(0x02, 0x84, 0xC7),
+    danger: Color32::from_rgb(0xDC, 0x26, 0x26),
+    busy_amber: Color32::from_rgb(0xB4, 0x53, 0x09),
+    warn_bg: Color32::from_rgb(0xFF, 0xFB, 0xEB),
+    hover_tint: Color32::from_rgba_premultiplied(0, 0, 0, 8),
+    log_default: Color32::from_rgb(0x3F, 0x3F, 0x46),
+    extreme_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    faint_bg: Color32::from_rgb(0xEC, 0xEE, 0xF2),
+};
+
+thread_local! {
+    /// 当前线程的调色板（GUI 全程单线程，切换即时生效）
+    static PAL: std::cell::Cell<Pal> = std::cell::Cell::new(PAL_DARK);
+}
+
+/// 当前调色板。所有取色点统一走这里。
+fn pal() -> Pal {
+    PAL.with(|p| p.get())
+}
+
+/// 当前是否浅色主题。
+fn is_light() -> bool {
+    pal().is_light
+}
+
+fn set_pal(mode: ThemeMode) {
+    PAL.with(|p| {
+        p.set(match mode {
+            ThemeMode::Dark => PAL_DARK,
+            ThemeMode::Light => PAL_LIGHT,
+        })
+    });
+}
 
 // ── 后台任务消息 ──
 enum Msg {
@@ -104,6 +242,8 @@ struct VaultApp {
     title_busy: bool,
     /// 伪装页后台任务共享的取消令牌（加密/还原/落位期间有效）。
     enc_cancel: Option<Cancel>,
+    /// 当前外观主题（深色/浅色），选择记在注册表。
+    theme: ThemeMode,
     // 口令到期提醒（90 天）
     pass_tip_due: bool,
     // 活跃标记心跳节流（保险箱会话/解密预览存在时每 30s 刷新一次）
@@ -211,7 +351,7 @@ impl VaultPage {
 }
 
 impl VaultApp {
-    fn new() -> Self {
+    fn new(theme: ThemeMode) -> Self {
         let (tx, rx) = channel::<Msg>();
         let mut shell = 0usize;
         if let Some(s) = paths::reg_get_shell() {
@@ -245,6 +385,7 @@ impl VaultApp {
             dec_origin: None,
             title_busy: false,
             enc_cancel: None,
+            theme,
             pass_tip_due: paths::pass_tip_due(),
             hb_last: std::time::Instant::now(),
         }
@@ -642,23 +783,23 @@ impl VaultApp {
         egui::TopBottomPanel::top("header")
             .frame(
                 egui::Frame::default()
-                    .fill(PANEL)
-                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                    .fill(pal().panel)
+                    .stroke(egui::Stroke::new(1.0_f32, pal().border))
                     .inner_margin(egui::Margin::symmetric(16.0, 9.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 8.0, ACCENT_DIM);
+                    ui.painter().rect_filled(rect, 8.0, pal().accent_dim);
                     ui.painter()
-                        .rect_stroke(rect, 8.0, egui::Stroke::new(1.0_f32, ACCENT));
+                        .rect_stroke(rect, 8.0, egui::Stroke::new(1.0_f32, pal().accent));
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         "VG",
                         egui::FontId::monospace(13.0),
-                        ACCENT_TEXT,
+                        pal().accent_text,
                     );
                     ui.add_space(2.0);
                     ui.vertical(|ui| {
@@ -667,7 +808,7 @@ impl VaultApp {
                                 egui::RichText::new("VaultGuard")
                                     .size(14.5)
                                     .strong()
-                                    .color(TEXT),
+                                    .color(pal().text),
                             );
                             ui.label(
                                 egui::RichText::new(format!(
@@ -679,16 +820,38 @@ impl VaultApp {
                                 ))
                                 .monospace()
                                 .size(10.0)
-                                .color(TEXT_SUB),
+                                .color(pal().text_sub),
                             );
                         });
                         ui.label(
                             egui::RichText::new("网盘伪装加密保险箱 —— 加密/还原均不触碰原文件")
                                 .size(11.0)
-                                .color(TEXT_MUTED),
+                                .color(pal().text_muted),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 主题切换（默认深色，选择记在注册表，下次启动沿用）
+                        let target = self.theme.toggled();
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(self.theme.switch_label())
+                                        .size(11.5)
+                                        .color(pal().text_sub),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0_f32, pal().border))
+                                .rounding(7.0)
+                                .min_size(egui::vec2(0.0, 26.0)),
+                            )
+                            .on_hover_text("切换深色 / 浅色外观")
+                            .clicked()
+                        {
+                            self.theme = target;
+                            paths::reg_set_theme(target.as_str());
+                            apply_theme(ctx, target);
+                        }
+                        ui.add_space(6.0);
                         if ui
                             .selectable_label(
                                 matches!(&self.page, Page::Vault),
@@ -718,7 +881,7 @@ impl VaultApp {
             .exact_width(262.0)
             .frame(
                 egui::Frame::default()
-                    .fill(BG)
+                    .fill(pal().bg)
                     .inner_margin(egui::Margin::same(12.0)),
             )
             .show(ctx, |ui| {
@@ -795,7 +958,7 @@ impl VaultApp {
                                 "已选择跳过口令：仅防随手翻看，任何拿到程序的人都可解密（敏感文件不建议）",
                             )
                             .size(9.5)
-                            .color(TEXT_MUTED),
+                            .color(pal().text_muted),
                         );
                         if ui.add(ghost_button("取消跳过，改设口令")).clicked() {
                             self.allow_no_pass = false;
@@ -807,7 +970,7 @@ impl VaultApp {
                                 "未设置口令：仅防随手翻看，任何拿到程序的人都可解密（不推荐用于敏感文件）",
                             )
                             .size(9.5)
-                            .color(TEXT_MUTED),
+                            .color(pal().text_muted),
                         );
                         if ui.add(ghost_button("跳过口令，不设口令继续")).clicked() {
                             self.allow_no_pass = true;
@@ -818,15 +981,15 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new("两次输入的口令不一致")
                             .size(9.5)
-                            .color(BUSY_AMBER),
+                            .color(pal().busy_amber),
                     );
                 } else {
                     // 口令强度实时评估：常见弱口令 / 长度 / 字符类
                     let (lv, msg) = pass_strength(&self.passphrase);
                     let color = match lv {
-                        2 => ACCENT_TEXT,
-                        1 => BUSY_AMBER,
-                        _ => DANGER,
+                        2 => pal().accent_text,
+                        1 => pal().busy_amber,
+                        _ => pal().danger,
                     };
                     ui.label(
                         egui::RichText::new(format!(
@@ -840,7 +1003,7 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new("同一条口令指纹相同，可用于核对是否输错。口令遗忘后文件无法找回")
                             .size(9.5)
-                            .color(TEXT_FAINT),
+                            .color(pal().text_faint),
                     );
                 }
 
@@ -861,7 +1024,7 @@ impl VaultApp {
 
                 ui.add_space(12.0);
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("高级").size(11.0).strong().color(TEXT_MUTED),
+                    egui::RichText::new("高级").size(11.0).strong().color(pal().text_muted),
                 )
                 .id_source("adv")
                 .show(ui, |ui| {
@@ -876,7 +1039,7 @@ impl VaultApp {
                                 if custom { "自定义 ✔" } else { "内置随机" }
                             ))
                             .size(11.0)
-                            .color(if custom { ACCENT_TEXT } else { TEXT_MUTED }),
+                            .color(if custom { pal().accent_text } else { pal().text_muted }),
                         );
                         if ui.add_enabled(!self.busy, ghost_button("自定义…")).clicked() {
                             let (filter, exts): (&str, &[&str]) = match shell {
@@ -916,7 +1079,7 @@ impl VaultApp {
                             egui::RichText::new(format!("　└ {}", p.display()))
                                 .monospace()
                                 .size(9.5)
-                                .color(TEXT_FAINT),
+                                .color(pal().text_faint),
                         );
                     }
                     ui.add_space(4.0);
@@ -1059,7 +1222,7 @@ impl VaultApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .fill(BG)
+                    .fill(pal().bg)
                     .inner_margin(egui::Margin::same(12.0)),
             )
             .show(ctx, |ui| {
@@ -1068,8 +1231,8 @@ impl VaultApp {
                 // ── 口令到期提醒（90 天，可关闭/确认）──
                 if self.pass_tip_due {
                     egui::Frame::default()
-                        .fill(Color32::from_rgb(0x1D, 0x18, 0x08))
-                        .stroke(egui::Stroke::new(1.0_f32, BUSY_AMBER))
+                        .fill(pal().warn_bg)
+                        .stroke(egui::Stroke::new(1.0_f32, pal().busy_amber))
                         .rounding(8.0)
                         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                         .show(ui, |ui| {
@@ -1077,7 +1240,7 @@ impl VaultApp {
                                 ui.label(
                                     egui::RichText::new("距上次设置/更换口令已超过 90 天，建议更换。")
                                         .size(11.0)
-                                        .color(BUSY_AMBER),
+                                        .color(pal().busy_amber),
                                 );
                                 if ui.button("已更换口令").clicked() {
                                     paths::pass_tip_touch();
@@ -1096,10 +1259,10 @@ impl VaultApp {
 
                 // ── 文件列表卡片 ──
                 egui::Frame::default()
-                    .fill(if dragging { ACCENT_DIM } else { CARD })
+                    .fill(if dragging { pal().accent_dim } else { pal().card })
                     .stroke(egui::Stroke::new(
                         1.0_f32,
-                        if dragging { ACCENT } else { BORDER },
+                        if dragging { pal().accent } else { pal().border },
                     ))
                     .rounding(10.0)
                     .inner_margin(egui::Margin::symmetric(8.0, 6.0))
@@ -1117,7 +1280,7 @@ impl VaultApp {
                                     }
                                 ))
                                 .size(11.5)
-                                .color(if dragging { ACCENT_TEXT } else { TEXT_MUTED }),
+                                .color(if dragging { pal().accent_text } else { pal().text_muted }),
                             );
                         });
                         ui.add_space(2.0);
@@ -1131,13 +1294,13 @@ impl VaultApp {
                                         ui.label(
                                             egui::RichText::new("把文件或文件夹拖进窗口")
                                                 .size(13.0)
-                                                .color(TEXT_SUB),
+                                                .color(pal().text_sub),
                                         );
                                         ui.add_space(2.0);
                                         ui.label(
                                             egui::RichText::new("加密后的容器拖回来即可还原")
                                                 .size(11.0)
-                                                .color(TEXT_FAINT),
+                                                .color(pal().text_faint),
                                         );
                                         ui.add_space(14.0);
                                     });
@@ -1176,8 +1339,8 @@ impl VaultApp {
                 // ── 上次输出快捷入口 ──
                 if let Some(out) = &self.last_output {
                     egui::Frame::default()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0_f32, ACCENT))
+                        .fill(pal().card)
+                        .stroke(egui::Stroke::new(1.0_f32, pal().accent))
                         .rounding(10.0)
                         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                         .show(ui, |ui| {
@@ -1191,7 +1354,7 @@ impl VaultApp {
                                 ui.label(
                                     egui::RichText::new(format!("上次输出: {}", out.display()))
                                         .size(10.0)
-                                        .color(TEXT_FAINT)
+                                        .color(pal().text_faint)
                                         .monospace(),
                                 );
                             });
@@ -1213,8 +1376,8 @@ impl VaultApp {
             None => return,
         };
         egui::Frame::default()
-            .fill(CARD)
-            .stroke(egui::Stroke::new(1.0_f32, ACCENT))
+            .fill(pal().card)
+            .stroke(egui::Stroke::new(1.0_f32, pal().accent))
             .rounding(10.0)
             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
             .show(ui, |ui| {
@@ -1226,7 +1389,7 @@ impl VaultApp {
                             tops.len()
                         ))
                         .size(11.5)
-                        .color(ACCENT_TEXT),
+                        .color(pal().accent_text),
                     );
                 });
                 ui.add_space(2.0);
@@ -1254,13 +1417,13 @@ impl VaultApp {
                                     egui::RichText::new(tag)
                                         .monospace()
                                         .size(10.5)
-                                        .color(TEXT_MUTED),
+                                        .color(pal().text_muted),
                                 );
                                 ui.label(
                                     egui::RichText::new(name)
                                         .monospace()
                                         .size(11.5)
-                                        .color(TEXT),
+                                        .color(pal().text),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -1273,7 +1436,7 @@ impl VaultApp {
                                             })
                                             .monospace()
                                             .size(10.0)
-                                            .color(TEXT_FAINT),
+                                            .color(pal().text_faint),
                                         );
                                     },
                                 );
@@ -1333,8 +1496,8 @@ impl VaultApp {
         egui::TopBottomPanel::top("vault_bar")
             .frame(
                 egui::Frame::default()
-                    .fill(PANEL)
-                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                    .fill(pal().panel)
+                    .stroke(egui::Stroke::new(1.0_f32, pal().border))
                     .inner_margin(egui::Margin::symmetric(14.0, 8.0)),
             )
             .show(ctx, |ui| {
@@ -1342,7 +1505,7 @@ impl VaultApp {
                     let width = ui.available_width();
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("保险箱").size(11.5).color(TEXT_SUB));
+                        ui.label(egui::RichText::new("保险箱").size(11.5).color(pal().text_sub));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.path)
                                 .desired_width((width - 276.0).max(180.0))
@@ -1386,7 +1549,7 @@ impl VaultApp {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let w = ui.available_width();
-                        ui.label(egui::RichText::new("口令").size(11.5).color(TEXT_SUB));
+                        ui.label(egui::RichText::new("口令").size(11.5).color(pal().text_sub));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.pass)
                                 .password(true)
@@ -1405,7 +1568,7 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new("新建需两次口令一致；打开已有保险箱只填第一格。口令遗忘后保险箱无法找回。")
                             .size(9.5)
-                            .color(TEXT_FAINT),
+                            .color(pal().text_faint),
                     );
                 } else {
                     let name = Path::new(self.vp.path.trim())
@@ -1424,16 +1587,16 @@ impl VaultApp {
                         .unwrap_or(0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("已解锁").size(11.0).color(ACCENT_TEXT));
-                        ui.label(egui::RichText::new(name).size(12.5).strong().color(TEXT));
+                        ui.label(egui::RichText::new("已解锁").size(11.0).color(pal().accent_text));
+                        ui.label(egui::RichText::new(name).size(12.5).strong().color(pal().text));
                         ui.label(
                             egui::RichText::new(format!("· {} 个条目 · 容器 {}", n, paths::sz(disk)))
                                 .size(11.0)
-                                .color(TEXT_SUB),
+                                .color(pal().text_sub),
                         );
                         if legacy {
                             ui.label(
-                                egui::RichText::new("· VGS1 旧格式").size(10.5).color(BUSY_AMBER),
+                                egui::RichText::new("· VGS1 旧格式").size(10.5).color(pal().busy_amber),
                             );
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1464,8 +1627,8 @@ impl VaultApp {
         egui::TopBottomPanel::bottom("vault_status")
             .frame(
                 egui::Frame::default()
-                    .fill(PANEL)
-                    .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                    .fill(pal().panel)
+                    .stroke(egui::Stroke::new(1.0_f32, pal().border))
                     .inner_margin(egui::Margin::symmetric(14.0, 6.0)),
             )
             .show(ctx, |ui| {
@@ -1476,7 +1639,7 @@ impl VaultApp {
                         ui.label(
                             egui::RichText::new(format!("{}…", stage))
                                 .size(11.0)
-                                .color(BUSY_AMBER),
+                                .color(pal().busy_amber),
                         );
                         if let Some(p) = progress {
                             ui.add(
@@ -1493,11 +1656,11 @@ impl VaultApp {
                         ui.label(
                             egui::RichText::new("期间请勿断电或关闭程序")
                                 .size(10.0)
-                                .color(TEXT_FAINT),
+                                .color(pal().text_faint),
                         );
                     } else {
-                        ui.label(egui::RichText::new("就绪").size(11.0).color(TEXT_MUTED));
-                        ui.label(egui::RichText::new(tail).size(10.5).color(TEXT_FAINT));
+                        ui.label(egui::RichText::new("就绪").size(11.0).color(pal().text_muted));
+                        ui.label(egui::RichText::new(tail).size(10.5).color(pal().text_faint));
                     }
                 });
             });
@@ -1506,8 +1669,8 @@ impl VaultApp {
     /// 未打开保险箱时的引导（P2 空状态之一：首次使用）。
     fn ui_vault_intro(&mut self, ui: &mut egui::Ui) {
         egui::Frame::default()
-            .fill(CARD)
-            .stroke(egui::Stroke::new(1.0_f32, BORDER))
+            .fill(pal().card)
+            .stroke(egui::Stroke::new(1.0_f32, pal().border))
             .rounding(10.0)
             .inner_margin(egui::Margin::symmetric(14.0, 12.0))
             .show(ui, |ui| {
@@ -1515,7 +1678,7 @@ impl VaultApp {
                     egui::RichText::new("开始使用隐私保险箱")
                         .size(13.0)
                         .strong()
-                        .color(TEXT),
+                        .color(pal().text),
                 );
                 ui.add_space(6.0);
                 for s in [
@@ -1523,7 +1686,7 @@ impl VaultApp {
                     "2. 设置口令：新建需两次输入一致；打开已有保险箱只填第一格。",
                     "3. 点「新建」创建空保险箱，或点「打开」解锁。",
                 ] {
-                    ui.label(egui::RichText::new(s).size(11.5).color(TEXT_SUB));
+                    ui.label(egui::RichText::new(s).size(11.5).color(pal().text_sub));
                     ui.add_space(3.0);
                 }
                 ui.add_space(4.0);
@@ -1532,7 +1695,7 @@ impl VaultApp {
                         "一个 .vgsafe 就是一个文件：可放网盘、U 盘、邮件附件；解锁后才显示其中的条目。",
                     )
                     .size(10.5)
-                    .color(TEXT_MUTED),
+                    .color(pal().text_muted),
                 );
             });
         ui.add_space(10.0);
@@ -1556,7 +1719,7 @@ impl VaultApp {
                         egui::RichText::new(format!("当前：{}", from))
                             .monospace()
                             .size(11.0)
-                            .color(TEXT_SUB),
+                            .color(pal().text_sub),
                     );
                     ui.add_space(4.0);
                     let r = ui.add(
@@ -1571,7 +1734,7 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new("只改名字、不改所在目录；移动位置请用「移动」。")
                             .size(9.5)
-                            .color(TEXT_FAINT),
+                            .color(pal().text_faint),
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -1606,7 +1769,7 @@ impl VaultApp {
                         egui::RichText::new(format!("当前：{}", name))
                             .monospace()
                             .size(11.0)
-                            .color(TEXT_SUB),
+                            .color(pal().text_sub),
                     );
                     ui.add_space(4.0);
                     let r = ui.add(
@@ -1622,7 +1785,7 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new("目标目录不存在会自动创建；重名自动加 _2/_3 后缀。")
                             .size(9.5)
-                            .color(TEXT_FAINT),
+                            .color(pal().text_faint),
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -1657,7 +1820,7 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new("更换会重写整个容器；口令遗忘后保险箱无法打开。")
                             .size(10.5)
-                            .color(TEXT_SUB),
+                            .color(pal().text_sub),
                     );
                     ui.add_space(4.0);
                     ui.add(
@@ -1678,7 +1841,7 @@ impl VaultApp {
                         ui.label(
                             egui::RichText::new("两次输入的新口令不一致")
                                 .size(9.5)
-                                .color(BUSY_AMBER),
+                                .color(pal().busy_amber),
                         );
                     }
                     ui.add_space(6.0);
@@ -1792,7 +1955,7 @@ impl VaultApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .fill(BG)
+                    .fill(pal().bg)
                     .inner_margin(egui::Margin::same(12.0)),
             )
             .show(ctx, |ui| {
@@ -1810,8 +1973,8 @@ impl VaultApp {
 
                 if legacy_unconfirmed {
                     egui::Frame::default()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0_f32, BUSY_AMBER))
+                        .fill(pal().card)
+                        .stroke(egui::Stroke::new(1.0_f32, pal().busy_amber))
                         .rounding(8.0)
                         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                         .show(ui, |ui| {
@@ -1819,7 +1982,7 @@ impl VaultApp {
                                 ui.label(
                                     egui::RichText::new("此保险箱为旧 VGS1 格式；第一次保存会升级为 VGS2，旧格式仍可由新版打开。")
                                         .size(10.5)
-                                        .color(BUSY_AMBER),
+                                        .color(pal().busy_amber),
                                 );
                                 if ui.add(b_ghost("确认后允许升级保存")).clicked() {
                                     self.vp.legacy_upgrade_ack = true;
@@ -1839,7 +2002,7 @@ impl VaultApp {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.add_enabled_ui(can_mutate, |ui| {
                             ui.menu_button(
-                                egui::RichText::new("添加 ▾").size(12.0).color(TEXT),
+                                egui::RichText::new("添加 ▾").size(12.0).color(pal().text),
                                 |ui| {
                                     if ui.button("添加文件…").clicked() {
                                         ui.close_menu();
@@ -1868,7 +2031,7 @@ impl VaultApp {
                         });
                         ui.add_enabled_ui(!busy, |ui| {
                             ui.menu_button(
-                                egui::RichText::new("导出 ▾").size(12.0).color(TEXT),
+                                egui::RichText::new("导出 ▾").size(12.0).color(pal().text),
                                 |ui| {
                                     if ui.button("导出全部…").clicked() {
                                         ui.close_menu();
@@ -1921,7 +2084,7 @@ impl VaultApp {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.menu_button(
-                                egui::RichText::new("更多 ▾").size(12.0).color(TEXT_SUB),
+                                egui::RichText::new("更多 ▾").size(12.0).color(pal().text_sub),
                                 |ui| {
                                     let one = self.vp.sel.len() == 1;
                                     if ui
@@ -1972,8 +2135,8 @@ impl VaultApp {
                     if self.vp.confirm_remove {
                         let n = self.vp.sel.len();
                         egui::Frame::default()
-                            .fill(CARD)
-                            .stroke(egui::Stroke::new(1.0_f32, DANGER))
+                            .fill(pal().card)
+                            .stroke(egui::Stroke::new(1.0_f32, pal().danger))
                             .rounding(8.0)
                             .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                             .show(ui, |ui| {
@@ -1985,7 +2148,7 @@ impl VaultApp {
                                             n
                                         ))
                                         .size(11.0)
-                                        .color(DANGER),
+                                        .color(pal().danger),
                                     );
                                     if ui
                                         .add_enabled(can_mutate && n > 0, b_primary("确认移除"))
@@ -2009,8 +2172,8 @@ impl VaultApp {
                             .map(|m| m.len())
                             .unwrap_or(0);
                         egui::Frame::default()
-                            .fill(CARD)
-                            .stroke(egui::Stroke::new(1.0_f32, BUSY_AMBER))
+                            .fill(pal().card)
+                            .stroke(egui::Stroke::new(1.0_f32, pal().busy_amber))
                             .rounding(8.0)
                             .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                             .show(ui, |ui| {
@@ -2022,7 +2185,7 @@ impl VaultApp {
                                             paths::sz(disk)
                                         ))
                                         .size(11.0)
-                                        .color(BUSY_AMBER),
+                                        .color(pal().busy_amber),
                                     );
                                     if ui.add_enabled(can_mutate, b_primary("开始压缩")).clicked() {
                                         self.vp.confirm_compact = false;
@@ -2082,8 +2245,8 @@ impl VaultApp {
                         .map(|s| s.entries.len())
                         .unwrap_or(0);
                     egui::Frame::default()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                        .fill(pal().card)
+                        .stroke(egui::Stroke::new(1.0_f32, pal().border))
                         .rounding(10.0)
                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                         .show(ui, |ui| {
@@ -2100,7 +2263,7 @@ impl VaultApp {
                                         )
                                     })
                                     .size(11.5)
-                                    .color(TEXT_MUTED),
+                                    .color(pal().text_muted),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -2111,7 +2274,7 @@ impl VaultApp {
                                                 self.vp.sel.len()
                                             ))
                                             .size(10.5)
-                                            .color(TEXT_FAINT),
+                                            .color(pal().text_faint),
                                         );
                                         if ui.add(b_ghost("清空选择")).clicked() {
                                             self.vp.sel.clear();
@@ -2143,7 +2306,7 @@ impl VaultApp {
                                     ui.label(
                                         egui::RichText::new("保险箱是空的：点上方「添加 ▾」放入文件或文件夹")
                                             .size(12.0)
-                                            .color(TEXT_SUB),
+                                            .color(pal().text_sub),
                                     );
                                     ui.add_space(10.0);
                                 });
@@ -2155,7 +2318,7 @@ impl VaultApp {
                                     ui.label(
                                         egui::RichText::new("没有匹配的条目：清空过滤条件可看全部")
                                             .size(12.0)
-                                            .color(TEXT_SUB),
+                                            .color(pal().text_sub),
                                     );
                                     ui.add_space(10.0);
                                 });
@@ -2275,9 +2438,9 @@ fn draw_row(
     );
     let selected = cx.sel.contains(&idx);
     if selected {
-        ui.painter().rect_filled(rect, 5.0, ACCENT_DIM);
+        ui.painter().rect_filled(rect, 5.0, pal().accent_dim);
     } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 5.0, CARD_HOVER);
+        ui.painter().rect_filled(rect, 5.0, pal().card_hover);
     }
     let dot_x = rect.left() + 8.0 + indent;
     let dot = egui::Rect::from_center_size(
@@ -2285,7 +2448,7 @@ fn draw_row(
         egui::vec2(7.0, 7.0),
     );
     ui.painter()
-        .rect_filled(dot, 2.0, if e.is_dir { DIR_SKY } else { TEXT_MUTED });
+        .rect_filled(dot, 2.0, if e.is_dir { pal().dir_sky } else { pal().text_muted });
 
     let name_left = dot_x + 14.0;
     let size_right = rect.right() - 10.0;
@@ -2299,7 +2462,7 @@ fn draw_row(
             egui::Align2::LEFT_CENTER,
             &e.name,
             egui::FontId::monospace(11.5),
-            if e.is_dir { TEXT_SUB } else { TEXT },
+            if e.is_dir { pal().text_sub } else { pal().text },
         );
     ui.painter().text(
         egui::pos2(size_right, rect.center().y),
@@ -2310,7 +2473,7 @@ fn draw_row(
             paths::sz(e.size)
         },
         egui::FontId::monospace(10.0),
-        TEXT_FAINT,
+        pal().text_faint,
     );
 
     if resp.clicked() {
@@ -2433,7 +2596,7 @@ fn draw_tree(
         egui::CollapsingHeader::new(
             egui::RichText::new(format!("{}（{}）", seg, child.count()))
                 .size(11.5)
-                .color(TEXT_SUB),
+                .color(pal().text_sub),
         )
         .id_source(format!("tree:{}", path))
         .default_open(true)
@@ -2454,7 +2617,7 @@ fn draw_tree(
 
 
 fn section_title(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(11.0).strong().color(TEXT_MUTED));
+    ui.label(egui::RichText::new(text).size(11.0).strong().color(pal().text_muted));
     ui.add_space(3.0);
 }
 
@@ -2508,10 +2671,10 @@ fn shell_card(
 ) -> bool {
     let mut content_rect = egui::Rect::NOTHING;
     egui::Frame::default()
-        .fill(if active { ACCENT_DIM } else { CARD })
+        .fill(if active { pal().accent_dim } else { pal().card })
         .stroke(egui::Stroke::new(
             1.0_f32,
-            if active { ACCENT } else { BORDER },
+            if active { pal().accent } else { pal().border },
         ))
         .rounding(8.0)
         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
@@ -2521,19 +2684,19 @@ fn shell_card(
                     egui::RichText::new(name)
                         .size(12.5)
                         .strong()
-                        .color(if active { ACCENT_TEXT } else { TEXT }),
+                        .color(if active { pal().accent_text } else { pal().text }),
                 );
                 h.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
-                    r.label(egui::RichText::new(badge).monospace().size(9.5).color(TEXT_FAINT));
+                    r.label(egui::RichText::new(badge).monospace().size(9.5).color(pal().text_faint));
                 });
             });
-            inner.label(egui::RichText::new(desc).size(10.5).color(TEXT_MUTED));
+            inner.label(egui::RichText::new(desc).size(10.5).color(pal().text_muted));
             content_rect = inner.min_rect();
         });
     let resp = ui.interact(content_rect, egui::Id::new(id), egui::Sense::click());
     if resp.hovered() && !active {
         ui.painter()
-            .rect_filled(content_rect, 8.0, Color32::from_white_alpha(6));
+            .rect_filled(content_rect, 8.0, pal().hover_tint);
     }
     resp.clicked()
 }
@@ -2553,12 +2716,12 @@ fn item_row(
         ui.add_space(4.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
         ui.painter()
-            .rect_filled(rect, 2.0, if is_dir { DIR_SKY } else { TEXT_MUTED });
+            .rect_filled(rect, 2.0, if is_dir { pal().dir_sky } else { pal().text_muted });
         let name_w = (ui.available_width() - 132.0).max(80.0);
         let name_text = egui::RichText::new(p.display().to_string())
             .monospace()
             .size(11.5)
-            .color(if is_dir { TEXT_SUB } else { TEXT });
+            .color(if is_dir { pal().text_sub } else { pal().text });
         let resp = ui.add_sized(
             [name_w, 20.0],
             egui::SelectableLabel::new(selected, name_text),
@@ -2572,8 +2735,8 @@ fn item_row(
         }
         if is_vault {
             egui::Frame::default()
-                .fill(ACCENT_DIM)
-                .stroke(egui::Stroke::new(1.0_f32, ACCENT))
+                .fill(pal().accent_dim)
+                .stroke(egui::Stroke::new(1.0_f32, pal().accent))
                 .rounding(4.0)
                 .inner_margin(egui::Margin::symmetric(5.0, 1.0))
                 .show(ui, |chip| {
@@ -2581,7 +2744,7 @@ fn item_row(
                         egui::RichText::new("VaultGuard")
                             .monospace()
                             .size(9.0)
-                            .color(ACCENT_TEXT),
+                            .color(pal().accent_text),
                     );
                 });
         } else {
@@ -2594,7 +2757,7 @@ fn item_row(
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
             if r.add(
-                egui::Button::new(egui::RichText::new("×").size(12.0).color(TEXT_MUTED))
+                egui::Button::new(egui::RichText::new("×").size(12.0).color(pal().text_muted))
                     .fill(Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE)
                     .small(),
@@ -2604,7 +2767,7 @@ fn item_row(
             {
                 action = RowAction::Remove;
             }
-            r.label(egui::RichText::new(size).monospace().size(10.0).color(TEXT_FAINT));
+            r.label(egui::RichText::new(size).monospace().size(10.0).color(pal().text_faint));
         });
     });
     action
@@ -2623,20 +2786,20 @@ fn log_card(
     cancel: Option<&Cancel>,
 ) {
     egui::Frame::default()
-        .fill(CARD)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+        .fill(pal().card)
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(10.0)
         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("日志").size(11.5).color(TEXT_MUTED));
+                ui.label(egui::RichText::new("日志").size(11.5).color(pal().text_muted));
                 if busy {
                     ui.add(egui::Spinner::new().size(12.0));
                     ui.label(
                         egui::RichText::new("后台处理中…")
                             .size(11.5)
-                            .color(BUSY_AMBER),
+                            .color(pal().busy_amber),
                     );
                     if let Some(c) = cancel {
                         ui.add_space(6.0);
@@ -2676,8 +2839,8 @@ fn error_card(ui: &mut egui::Ui, err: &mut Option<String>) {
         return;
     };
     egui::Frame::default()
-        .fill(CARD)
-        .stroke(egui::Stroke::new(1.0_f32, DANGER))
+        .fill(pal().card)
+        .stroke(egui::Stroke::new(1.0_f32, pal().danger))
         .rounding(8.0)
         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
         .show(ui, |ui| {
@@ -2687,9 +2850,9 @@ fn error_card(ui: &mut egui::Ui, err: &mut Option<String>) {
                     egui::RichText::new("上一步失败")
                         .size(11.5)
                         .strong()
-                        .color(DANGER),
+                        .color(pal().danger),
                 );
-                ui.label(egui::RichText::new(msg.clone()).size(11.0).color(TEXT));
+                ui.label(egui::RichText::new(msg.clone()).size(11.0).color(pal().text));
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -2710,14 +2873,14 @@ fn log_panel(ui: &mut egui::Ui, logs: &[String]) {
     egui::CollapsingHeader::new(
         egui::RichText::new(format!("日志（{} 行）", logs.len()))
             .size(11.5)
-            .color(TEXT_MUTED),
+            .color(pal().text_muted),
     )
     .id_source("logs_panel")
     .default_open(false)
     .show(ui, |ui| {
         egui::Frame::default()
-            .fill(CARD)
-            .stroke(egui::Stroke::new(1.0_f32, BORDER))
+            .fill(pal().card)
+            .stroke(egui::Stroke::new(1.0_f32, pal().border))
             .rounding(10.0)
             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
             .show(ui, |ui| {
@@ -2742,13 +2905,13 @@ fn log_panel(ui: &mut egui::Ui, logs: &[String]) {
 
 fn log_color(line: &str) -> Color32 {
     if line.starts_with(">>>") {
-        ACCENT_TEXT
+        pal().accent_text
     } else if line.contains("失败") || line.contains("未处理") || line.contains("错误") {
-        DANGER
+        pal().danger
     } else if line.contains("完成") || line.contains("成功") || line.contains("就绪") {
-        ACCENT
+        pal().accent
     } else {
-        LOG_DEFAULT
+        pal().log_default
     }
 }
 
@@ -2760,26 +2923,26 @@ fn b_primary(text: &str) -> egui::Button<'static> {
         egui::RichText::new(text)
             .size(12.0)
             .strong()
-            .color(Color32::WHITE),
+            .color(pal().on_accent),
     )
-    .fill(ACCENT)
+    .fill(pal().accent)
     .stroke(egui::Stroke::NONE)
     .rounding(7.0)
     .min_size(egui::vec2(0.0, BTN_H))
 }
 
 fn b_secondary(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(12.0).color(TEXT))
-        .fill(CARD_HOVER)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+    egui::Button::new(egui::RichText::new(text).size(12.0).color(pal().text))
+        .fill(pal().card_hover)
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(7.0)
         .min_size(egui::vec2(0.0, BTN_H))
 }
 
 fn b_ghost(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(11.5).color(TEXT_SUB))
+    egui::Button::new(egui::RichText::new(text).size(11.5).color(pal().text))
         .fill(Color32::TRANSPARENT)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(7.0)
         .min_size(egui::vec2(0.0, BTN_H))
 }
@@ -2788,12 +2951,12 @@ fn b_ghost(text: &str) -> egui::Button<'static> {
 /// 点击只是置位令牌，长任务在下一个检查点停下，容器与已有产物保持原状。
 fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
     if c.is_cancelled() {
-        ui.label(egui::RichText::new("正在取消…").size(11.0).color(DANGER));
+        ui.label(egui::RichText::new("正在取消…").size(11.0).color(pal().danger));
         return;
     }
-    let btn = egui::Button::new(egui::RichText::new("取消").size(11.5).color(TEXT_SUB))
+    let btn = egui::Button::new(egui::RichText::new("取消").size(11.5).color(pal().text))
         .fill(Color32::TRANSPARENT)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(6.0)
         .min_size(egui::vec2(52.0, 22.0));
     if ui
@@ -2806,25 +2969,25 @@ fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
 }
 
 fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(13.0).strong().color(Color32::WHITE))
-        .fill(ACCENT)
+    egui::Button::new(egui::RichText::new(text).size(13.0).strong().color(pal().on_accent))
+        .fill(pal().accent)
         .stroke(egui::Stroke::NONE)
         .rounding(8.0)
         .min_size(egui::vec2(0.0, 34.0))
 }
 
 fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(12.5).color(TEXT))
-        .fill(CARD_HOVER)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+    egui::Button::new(egui::RichText::new(text).size(12.5).color(pal().text))
+        .fill(pal().card_hover)
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(8.0)
         .min_size(egui::vec2(0.0, 32.0))
 }
 
 fn ghost_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(11.5).color(TEXT_SUB))
+    egui::Button::new(egui::RichText::new(text).size(11.5).color(pal().text))
         .fill(Color32::TRANSPARENT)
-        .stroke(egui::Stroke::new(1.0_f32, BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(7.0)
         .min_size(egui::vec2(0.0, 26.0))
 }
@@ -3062,14 +3225,22 @@ pub fn run() {
         &app_name,
         opts,
         Box::new(|cc| {
-            install_style(&cc.egui_ctx);
-            Ok(Box::new(VaultApp::new()))
+            let theme = ThemeMode::parse(&paths::reg_get_theme());
+            install_fonts(&cc.egui_ctx);
+            apply_theme(&cc.egui_ctx, theme);
+            Ok(Box::new(VaultApp::new(theme)))
         }),
     );
 }
 
-/// 主题：系统 CJK/等宽字体 + zinc/emerald 暗色样式（对齐退役 React 版的设计语言）。
-fn install_style(ctx: &egui::Context) {
+/// 切换外观：更新调色板并即时重建样式（深色/浅色各一套令牌）。
+fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
+    set_pal(mode);
+    ctx.set_style(build_style());
+}
+
+/// 系统 CJK/等宽字体。只装一次（切换主题不重复解析字体）。
+fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     if let Some(bytes) = load_cjk_font_bytes() {
         fonts
@@ -3090,35 +3261,45 @@ fn install_style(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
 
+/// 按当前调色板装配样式（深色 zinc/emerald 为设计基线，浅色逐项对应）。
+fn build_style() -> egui::Style {
     let mut style = egui::Style::default();
     let v = &mut style.visuals;
-    *v = egui::Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = CARD;
-    v.extreme_bg_color = Color32::from_rgb(0x0D, 0x0D, 0x10);
-    v.faint_bg_color = Color32::from_rgb(0x14, 0x14, 0x17);
-    v.window_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    *v = if is_light() {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    v.panel_fill = pal().bg;
+    v.window_fill = pal().card;
+    v.extreme_bg_color = pal().extreme_bg;
+    v.faint_bg_color = pal().faint_bg;
+    v.window_stroke = egui::Stroke::new(1.0_f32, pal().border);
     v.window_rounding = egui::Rounding::same(10.0);
-    v.selection.bg_fill = ACCENT_DIM;
-    v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
-    v.hyperlink_color = ACCENT_TEXT;
-    v.warn_fg_color = BUSY_AMBER;
-    v.override_text_color = Some(TEXT);
+    v.selection.bg_fill = pal().accent_dim;
+    v.selection.stroke = egui::Stroke::new(1.0_f32, pal().accent);
+    v.hyperlink_color = pal().accent_text;
+    v.warn_fg_color = pal().busy_amber;
+    v.override_text_color = Some(pal().text);
 
     for (w, bg, fg) in [
-        (&mut v.widgets.inactive, CARD, TEXT),
-        (&mut v.widgets.hovered, CARD_HOVER, TEXT),
-        (&mut v.widgets.active, ACCENT_DIM, ACCENT_TEXT),
+        (&mut v.widgets.inactive, pal().card, pal().text),
+        (&mut v.widgets.hovered, pal().card_hover, pal().text),
+        (&mut v.widgets.active, pal().accent_dim, pal().accent_text),
     ] {
         w.weak_bg_fill = bg;
         w.bg_fill = bg;
         w.fg_stroke = egui::Stroke::new(1.0_f32, fg);
-        w.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+        w.bg_stroke = egui::Stroke::new(1.0_f32, pal().border);
         w.rounding = egui::Rounding::same(7.0);
     }
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_SUB);
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, pal().text_sub);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, pal().border);
+    // 禁用控件会被淡向这个颜色（egui 的 gray_out 目标）。默认值在深色下接近纯黑，
+    // 禁用文字会糊成一片；改成面板底色，禁用态 = 「淡一档」而不是「看不见」。
+    v.widgets.noninteractive.weak_bg_fill = pal().panel;
 
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
@@ -3141,7 +3322,7 @@ fn install_style(ctx: &egui::Context) {
         .text_styles
         .insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.0));
 
-    ctx.set_style(style);
+    style
 }
 
 fn load_cjk_font_bytes() -> Option<Vec<u8>> {
@@ -3305,5 +3486,11 @@ fn open_in_explorer(path: &Path) {
 
 /// --ui-smoke 自检：验证 GUI 状态可构造（读注册表/提醒文件，供自动化冒烟）。
 pub fn smoke() {
-    let _app = VaultApp::new();
+    // 两种主题各装配一次样式并构造一次界面，确保主题分支都不 panic
+    for mode in [ThemeMode::Dark, ThemeMode::Light] {
+        set_pal(mode);
+        let style = build_style();
+        assert_eq!(style.visuals.dark_mode, !is_light(), "主题与基准 Visuals 不一致");
+        let _app = VaultApp::new(mode);
+    }
 }

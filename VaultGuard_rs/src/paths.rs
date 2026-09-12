@@ -344,6 +344,26 @@ pub fn reg_set_shell(s: &str) {
     }
 }
 
+/// 读取上次的外观主题（"dark" / "light"；缺失或异常按 dark）。
+pub fn reg_get_theme() -> String {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let hk = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(k) = hk.open_subkey(REG_PATH) {
+        if let Ok(v) = k.get_value::<String, _>("theme") {
+            return v;
+        }
+    }
+    String::new()
+}
+
+pub fn reg_set_theme(s: &str) {
+    use winreg::enums::HKEY_CURRENT_USER;
+    let hk = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(k) = hk.create_subkey(REG_PATH) {
+        let _ = k.0.set_value("theme", &s);
+    }
+}
+
 // ── 口令更换提醒（每 90 天，可关闭）───────────────────────────────
 
 pub const PASS_TIP_DAYS: i64 = 90;
