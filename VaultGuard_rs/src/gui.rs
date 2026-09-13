@@ -25,6 +25,76 @@ const SHELL_DESCS: [&str; 3] = [
 ];
 const SHELL_BADGES: [&str; 3] = ["png", "jpg", "docx"];
 
+// ── 视觉令牌：字号 / 间距 / 圆角 / 控件尺寸 ──────────────────────────────
+// 改造前各处直接写魔法数，全文件出现 10 档字号、10 档间距、6 档圆角、
+// 6 档内边距——相邻档只差 0.5px 时人眼读到的是「参差」而不是「层级」，
+// 这正是界面显拥挤、显乱的主因。下面把取值收敛成有限档位，样式点统一取令牌。
+//
+// 字号：4 档（原来 9.0/9.5/10.0/10.5/11.0/11.5/12.0/12.5/13.0/14.5 共 10 档）
+/// 品牌名 / 页面级标题
+const FS_TITLE: f32 = 15.0;
+/// 正文、按钮、列表主文字
+const FS_BODY: f32 = 13.0;
+/// 次级标签、区块小标题
+const FS_SUB: f32 = 12.0;
+/// 说明文字、状态小字、徽标（原先小到 9.0，可读性不足）
+const FS_NOTE: f32 = 11.0;
+
+// 间距：6 档阶梯（4 的倍数，形成节奏）
+/// 紧贴：标签与它自己的控件之间
+const SP_XS: f32 = 4.0;
+/// 同组元素之间
+const SP_S: f32 = 8.0;
+/// 区块与区块之间
+const SP_L: f32 = 16.0;
+/// 大间隔 / 空状态上下留白
+const SP_XL: f32 = 24.0;
+/// 空状态（无内容）专用大留白
+const SP_XXL: f32 = 32.0;
+
+// 内边距：卡片统一一套，不再每个卡片各自为政
+/// 卡片左右内边距
+const PAD_X: f32 = 14.0;
+/// 卡片上下内边距
+const PAD_Y: f32 = 12.0;
+/// 顶栏内边距（比卡片略大，作为页面留白基准）
+const HEADER_PAD_X: f32 = 20.0;
+const HEADER_PAD_Y: f32 = 14.0;
+
+// 圆角：3 档
+/// 卡片（原先 8/10 混用）
+const R_MD: f32 = 12.0;
+/// 控件 / 小卡片
+const R_SM: f32 = 8.0;
+/// 徽标
+const R_CHIP: f32 = 4.0;
+
+// 控件高度：分层，拉开主次（原先全挤在 22–36 之间且无规律）
+/// 主操作按钮（开始加密）
+const H_BTN_MAIN: f32 = 40.0;
+/// 次级按钮（还原 / 文件 / 文件夹）
+const H_BTN_SEC: f32 = 34.0;
+/// 行内小按钮（顶栏页签、表单内幽灵按钮）
+const H_BTN: f32 = 30.0;
+/// 迷你按钮（次级操作：移除/清空/分享说明；状态条与提醒条内的按钮）
+const H_BTN_SM: f32 = 24.0;
+/// Spinner 直径（几何尺寸，非文字）
+const ICON_S: f32 = 12.0;
+
+// 窗口与侧栏尺寸
+/// 左侧栏宽度（原 262：口令说明等文案在窄栏里反复折行，是「挤」的主要来源）
+const SIDE_W: f32 = 300.0;
+const WINDOW_W: f32 = 1060.0;
+const WINDOW_H: f32 = 720.0;
+const MIN_WINDOW_W: f32 = 860.0;
+const MIN_WINDOW_H: f32 = 600.0;
+/// 文件行列内：右侧元信息（徽标 + 大小 + 移除）预留宽度
+const ROW_META_W: f32 = 132.0;
+/// 文件行内徽标占位宽度（无徽标时补空格，保证名称列对齐）
+const ROW_BADGE_W: f32 = 74.0;
+/// 文件行高（原 20：行与行贴在一起，长列表读起来很挤）
+const ROW_H: f32 = 26.0;
+
 // ── 主题与配色：深色 / 浅色两套令牌（对齐退役 React 版的 tailwind 配色）──
 
 /// 界面主题。选择持久化在注册表 `HKCU\Software\VaultGuard\theme`。
@@ -792,7 +862,7 @@ impl VaultApp {
                 egui::Frame::default()
                     .fill(pal().panel)
                     .stroke(egui::Stroke::new(1.0_f32, pal().border))
-                    .inner_margin(egui::Margin::symmetric(16.0, 9.0)),
+                    .inner_margin(egui::Margin::symmetric(HEADER_PAD_X, HEADER_PAD_Y)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -808,12 +878,12 @@ impl VaultApp {
                         egui::FontId::monospace(13.0),
                         pal().accent_text,
                     );
-                    ui.add_space(2.0);
+                    ui.add_space(SP_XS);
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new("VaultGuard")
-                                    .size(14.5)
+                                    .size(FS_TITLE)
                                     .strong()
                                     .color(pal().text),
                             );
@@ -826,13 +896,13 @@ impl VaultApp {
                                         .unwrap_or("1")
                                 ))
                                 .monospace()
-                                .size(10.0)
+                                .size(FS_NOTE)
                                 .color(pal().text_sub),
                             );
                         });
                         ui.label(
                             egui::RichText::new("网盘伪装加密保险箱 —— 加密/还原均不触碰原文件")
-                                .size(11.0)
+                                .size(FS_NOTE)
                                 .color(pal().text_muted),
                         );
                     });
@@ -843,13 +913,13 @@ impl VaultApp {
                             .add(
                                 egui::Button::new(
                                     egui::RichText::new(self.theme.switch_label())
-                                        .size(11.5)
+                                        .size(FS_SUB)
                                         .color(pal().text_sub),
                                 )
                                 .fill(Color32::TRANSPARENT)
                                 .stroke(egui::Stroke::new(1.0_f32, pal().border))
-                                .rounding(7.0)
-                                .min_size(egui::vec2(0.0, 26.0)),
+                                .rounding(R_SM)
+                                .min_size(egui::vec2(0.0, H_BTN)),
                             )
                             .on_hover_text("切换深色 / 浅色外观")
                             .clicked()
@@ -858,7 +928,7 @@ impl VaultApp {
                             paths::reg_set_theme(target.as_str());
                             apply_theme(ctx, target);
                         }
-                        ui.add_space(6.0);
+                        ui.add_space(SP_S);
                         if tab_button(ui, "伪装加密", matches!(&self.page, Page::Disguise)) {
                             self.page = Page::Disguise;
                         }
@@ -873,343 +943,360 @@ impl VaultApp {
     fn ui_left(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("side")
             .resizable(false)
-            .exact_width(262.0)
+            .exact_width(SIDE_W)
             .frame(
                 egui::Frame::default()
                     .fill(pal().bg)
-                    .inner_margin(egui::Margin::same(12.0)),
+                    .inner_margin(egui::Margin::same(SP_L)),
             )
             .show(ctx, |ui| {
                 let width = ui.available_width();
 
-                section_title(ui, "伪装外壳");
-                for (i, name) in SHELL_NAMES.iter().enumerate() {
-                    let active = self.shell == i;
-                    if shell_card(
-                        ui,
-                        &format!("shell{}", i),
-                        active,
-                        name,
-                        SHELL_BADGES[i],
-                        SHELL_DESCS[i],
-                    ) {
-                        self.shell = i;
-                        paths::reg_set_shell(SHELLS[i]);
-                    }
-                    ui.add_space(4.0);
-                }
-
-                ui.add_space(10.0);
-                section_title(ui, "口令（保护隐私，推荐设置）");
-                ui.horizontal(|ui| {
-                    let r1 = ui.add(
-                        egui::TextEdit::singleline(&mut self.passphrase)
-                            .password(!self.show_pass)
-                            .hint_text("输入口令")
-                            .desired_width(width - 74.0)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                    if ui
-                        .add(ghost_button(if self.show_pass { "隐藏" } else { "显示" }))
-                        .clicked()
-                    {
-                        self.show_pass = !self.show_pass;
-                    }
-                    if r1.changed() {
-                        self.allow_no_pass = false;
-                    }
-                });
-                ui.add_space(3.0);
-                let r2 = ui.add(
-                    egui::TextEdit::singleline(&mut self.passphrase2)
-                        .password(true)
-                        .hint_text("再次输入口令确认")
-                        .desired_width(width - 4.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                ui.add_space(3.0);
-                if ui
-                    .add_enabled(
-                        !self.busy && self.passphrase.is_empty(),
-                        ghost_button("生成强口令（自动填入并复制）"),
-                    )
-                    .clicked()
-                {
-                    let gen = crypto::generate_passphrase(16);
-                    self.passphrase = gen.clone();
-                    self.passphrase2 = gen;
-                    ui.output_mut(|o| o.copied_text = self.passphrase.clone());
-                    self.log("已生成 16 位强口令并复制到剪贴板，请妥善保存（遗忘无法找回）。");
-                }
-                if r2.changed() {
-                    self.allow_no_pass = false;
-                }
-                ui.add_space(3.0);
-                // 口令状态机：未设口令时提供 跳过/取消跳过 双向按钮，跳过后也能反悔
-                if self.passphrase.is_empty() {
-                    if self.allow_no_pass {
-                        ui.label(
-                            egui::RichText::new(
-                                "已选择跳过口令：仅防随手翻看，任何拿到程序的人都可解密（敏感文件不建议）",
-                            )
-                            .size(9.5)
-                            .color(pal().text_muted),
-                        );
-                        if ui.add(ghost_button("取消跳过，改设口令")).clicked() {
-                            self.allow_no_pass = false;
-                            self.log("已取消跳过口令：设置口令（两次输入一致）后即可口令加密。");
-                        }
-                    } else {
-                        ui.label(
-                            egui::RichText::new(
-                                "未设置口令：仅防随手翻看，任何拿到程序的人都可解密（不推荐用于敏感文件）",
-                            )
-                            .size(9.5)
-                            .color(pal().text_muted),
-                        );
-                        if ui.add(ghost_button("跳过口令，不设口令继续")).clicked() {
-                            self.allow_no_pass = true;
-                            self.log("已跳过口令：本次加密使用内置密钥（不推荐用于敏感文件）。");
-                        }
-                    }
-                } else if self.passphrase != self.passphrase2 {
-                    ui.label(
-                        egui::RichText::new("两次输入的口令不一致")
-                            .size(9.5)
-                            .color(pal().busy_amber),
-                    );
-                } else {
-                    // 口令强度实时评估：常见弱口令 / 长度 / 字符类
-                    let (lv, msg) = pass_strength(&self.passphrase);
-                    let color = match lv {
-                        2 => pal().accent_text,
-                        1 => pal().busy_amber,
-                        _ => pal().danger,
-                    };
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}（Argon2id）· 钥匙指纹 {}",
-                            msg,
-                            crypto::pass_fingerprint(&self.passphrase)
-                        ))
-                        .size(9.5)
-                        .color(color),
-                    );
-                    ui.label(
-                        egui::RichText::new("同一条口令指纹相同，可用于核对是否输错。口令遗忘后文件无法找回")
-                            .size(9.5)
-                            .color(pal().text_faint),
-                    );
-                }
-
-                ui.add_space(10.0);
-                section_title(ui, "输出目录");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.out_dir)
-                            .desired_width(width - 76.0)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                    if ui.button("浏览…").clicked() {
-                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                            self.out_dir = d.display().to_string();
-                        }
-                    }
-                });
-
-                ui.add_space(12.0);
-                egui::CollapsingHeader::new(
-                    egui::RichText::new("高级").size(11.0).strong().color(pal().text_muted),
-                )
-                .id_source("adv")
-                .show(ui, |ui| {
-                    ui.add_space(2.0);
-                    // 自定义封面：跟随当前选中的外壳，各自记忆（存于 %APPDATA% 封面目录）
-                    let shell = SHELLS[self.shell];
-                    let custom = paths::custom_cover(shell).is_some();
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "封面：{}",
-                                if custom { "自定义 ✔" } else { "内置随机" }
-                            ))
-                            .size(11.0)
-                            .color(if custom { pal().accent_text } else { pal().text_muted }),
-                        );
-                        if ui.add_enabled(!self.busy, ghost_button("自定义…")).clicked() {
-                            let (filter, exts): (&str, &[&str]) = match shell {
-                                "jpg" => ("JPG 图片", &["jpg", "jpeg"]),
-                                "docx" => ("DOCX 文档", &["docx"]),
-                                _ => ("PNG 图片", &["png"]),
-                            };
-                            if let Some(p) =
-                                rfd::FileDialog::new().add_filter(filter, exts).pick_file()
+                // 底部操作区用嵌套面板钉在栏底：面板高度由 egui 按内容计算——
+                // 原先靠 magic number（group_height = 106.0）撑空白，间距一改就错位。
+                // 面板必须先声明：声明之后，剩余空间才归上方字段区。
+                egui::TopBottomPanel::bottom("side_actions")
+                    .show_separator_line(false)
+                    .frame(egui::Frame::default().inner_margin(egui::Margin {
+                        left: 0.0,
+                        right: 0.0,
+                        top: SP_L,
+                        bottom: 0.0,
+                    }))
+                    .show_inside(ui, |ui| {
+                        // 操作按钮组固定在面板底部：用空白撑开后从上往下排
+                        let busy = self.busy;
+                        ui.columns(2, |cols| {
+                            let w0 = cols[0].available_width();
+                            let w1 = cols[1].available_width();
+                            if cols[0]
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new("文件").min_size(egui::vec2(w0, H_BTN_SEC)),
+                                )
+                                .clicked()
                             {
-                                match shells::validate_cover(shell, &p) {
-                                    Ok(()) => match paths::set_custom_cover(shell, &p) {
-                                        Ok(()) => self.log(&format!(
-                                            "已启用自定义封面（{} 外壳）：{}",
-                                            shell,
-                                            p.display()
-                                        )),
+                                if let Some(files) = rfd::FileDialog::new().pick_files() {
+                                    let n = files.len();
+                                    for f in files {
+                                        self.items.push(f);
+                                    }
+                                    self.log(&format!("添加 {} 个文件", n));
+                                }
+                            }
+                            if cols[1]
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new("文件夹").min_size(egui::vec2(w1, H_BTN_SEC)),
+                                )
+                                .clicked()
+                            {
+                                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                    self.items.push(d);
+                                    self.log("添加文件夹");
+                                }
+                            }
+                        });
+
+                        // 操作按钮组固定在面板底部：用空白撑开后从上往下排
+                        let pass_ready = (!self.passphrase.is_empty()
+                            && self.passphrase == self.passphrase2)
+                            || self.allow_no_pass;
+                        if ui
+                            .add_enabled(
+                                !self.busy && pass_ready,
+                                primary_button("开始加密（所选外壳）").min_size(egui::vec2(width, H_BTN_MAIN)),
+                            )
+                            .clicked()
+                        {
+                            self.run_enc();
+                        }
+                        ui.add_space(SP_S);
+                        let dec_label = if self.vault_count > 0 {
+                            format!("还原 VaultGuard 文件（{}）", self.vault_count)
+                        } else {
+                            "还原 VaultGuard 文件".to_string()
+                        };
+                        if ui.add_sized([width, H_BTN_SEC], secondary_button(dec_label)).clicked() {
+                            self.run_dec();
+                        }
+                        // 次级操作：降到迷你档，权重明显低于上方两个主操作；
+                        // 不可用时用悬停文字说明原因，避免「点了没反应」的困惑。
+                        // 注：不按条件隐藏——按钮生灭会让下方字段区跳动。
+                        ui.add_space(SP_S);
+                        ui.columns(3, |cols| {
+                            let ws = [
+                                cols[0].available_width(),
+                                cols[1].available_width(),
+                                cols[2].available_width(),
+                            ];
+                            if cols[0]
+                                .add_enabled(
+                                    !self.sel.is_empty() && !self.busy,
+                                    ghost_button_mini("移除选中")
+                                        .min_size(egui::vec2(ws[0], H_BTN_SM)),
+                                )
+                                .on_disabled_hover_text("先在右侧列表中选中条目，再执行移除。")
+                                .clicked()
+                            {
+                                self.remove_selected();
+                            }
+                            if cols[1]
+                                .add_enabled(
+                                    !self.items.is_empty() && !self.busy,
+                                    ghost_button_mini("清空列表")
+                                        .min_size(egui::vec2(ws[1], H_BTN_SM)),
+                                )
+                                .on_disabled_hover_text("列表为空，无需清空。")
+                                .clicked()
+                            {
+                                self.items.clear();
+                                self.sel.clear();
+                                self.log("列表已清空");
+                            }
+                            if cols[2]
+                                .add_enabled(
+                                    self.last_output.is_some(),
+                                    ghost_button_mini("分享说明")
+                                        .min_size(egui::vec2(ws[2], H_BTN_SM)),
+                                )
+                                .on_disabled_hover_text("加密完成后，可在此复制带口令的分享文案。")
+                                .clicked()
+                            {
+                                let out = self.last_output.clone();
+                                if let Some(out) = out {
+                                    // 口令会随文案进剪贴板（Win+V 剪贴板历史会留存），复制前确认
+                                    if !self.passphrase.is_empty() {
+                                        let ok = rfd::MessageDialog::new()
+                                            .set_title("分享说明")
+                                            .set_description(
+                                                "分享文案将包含口令并复制到剪贴板。\n注意：Windows 剪贴板历史（Win+V）会留存口令，用后建议清空剪贴板。\n\n是否继续？",
+                                            )
+                                            .set_buttons(rfd::MessageButtons::OkCancel)
+                                            .show();
+                                        if ok != rfd::MessageDialogResult::Ok {
+                                            self.log("已取消复制分享说明。");
+                                            return;
+                                        }
+                                    }
+                                    let pass_note = if self.passphrase.is_empty() {
+                                        "（未设口令：内置密钥模式）".to_string()
+                                    } else {
+                                        self.passphrase.clone()
+                                    };
+                                    let text = format!(
+                                        "【VaultGuard 分享说明】\n文件：{}\n口令：{}\n接收方步骤：打开 VaultGuard.exe → 拖入本文件 → 输入口令 → 还原。\n下载：https://github.com/AAAduck/VaultGuard/releases （或由发送方直接提供 VaultGuard.exe）\n安全提醒：口令请勿与文件走同一渠道发送；口令遗忘无法找回。",
+                                        out.display(),
+                                        pass_note
+                                    );
+                                    cols[2].output_mut(|o| o.copied_text = text);
+                                    self.log("分享说明已复制到剪贴板。");
+                                }
+                            }
+                        });
+                    });
+
+                // 字段区：窗口变矮时在剩余空间内滚动，不再挤压或裁掉下方按钮
+                egui::ScrollArea::vertical()
+                    .id_source("side_fields")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // 滚动条出现时会吃掉一点宽度，这里按实际可用宽度重算
+                        let width = ui.available_width();
+                        section_title(ui, "伪装外壳");
+                        for (i, name) in SHELL_NAMES.iter().enumerate() {
+                            let active = self.shell == i;
+                            if shell_card(
+                                ui,
+                                &format!("shell{}", i),
+                                active,
+                                name,
+                                SHELL_BADGES[i],
+                                SHELL_DESCS[i],
+                            ) {
+                                self.shell = i;
+                                paths::reg_set_shell(SHELLS[i]);
+                            }
+                            ui.add_space(SP_XS);
+                        }
+
+                        ui.add_space(SP_L);
+                        section_title(ui, "口令（保护隐私，推荐设置）");
+                        ui.horizontal(|ui| {
+                            let r1 = ui.add(
+                                egui::TextEdit::singleline(&mut self.passphrase)
+                                    .password(!self.show_pass)
+                                    .hint_text("输入口令")
+                                    .desired_width(width - 74.0)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            if ui
+                                .add(ghost_button(if self.show_pass { "隐藏" } else { "显示" }))
+                                .clicked()
+                            {
+                                self.show_pass = !self.show_pass;
+                            }
+                            if r1.changed() {
+                                self.allow_no_pass = false;
+                            }
+                        });
+                        ui.add_space(SP_XS);
+                        let r2 = ui.add(
+                            egui::TextEdit::singleline(&mut self.passphrase2)
+                                .password(true)
+                                .hint_text("再次输入口令确认")
+                                .desired_width(width - 4.0)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add_space(SP_XS);
+                        if ui
+                            .add_enabled(
+                                !self.busy && self.passphrase.is_empty(),
+                                ghost_button("生成强口令（自动填入并复制）"),
+                            )
+                            .clicked()
+                        {
+                            let gen = crypto::generate_passphrase(16);
+                            self.passphrase = gen.clone();
+                            self.passphrase2 = gen;
+                            ui.output_mut(|o| o.copied_text = self.passphrase.clone());
+                            self.log("已生成 16 位强口令并复制到剪贴板，请妥善保存（遗忘无法找回）。");
+                        }
+                        if r2.changed() {
+                            self.allow_no_pass = false;
+                        }
+                        ui.add_space(SP_XS);
+                        // 口令状态机：未设口令时提供 跳过/取消跳过 双向按钮，跳过后也能反悔
+                        if self.passphrase.is_empty() {
+                            if self.allow_no_pass {
+                                ui.label(
+                                    egui::RichText::new("已跳过口令：拿到程序的人都能解密")
+                                        .size(FS_NOTE)
+                                        .color(pal().text_muted),
+                                )
+                                .on_hover_text(
+                                    "跳过口令 = 使用内置密钥：仅防随手翻看，任何拿到程序的人都能解密；敏感文件不建议跳过。",
+                                );
+                                if ui.add(ghost_button("取消跳过，改设口令")).clicked() {
+                                    self.allow_no_pass = false;
+                                    self.log("已取消跳过口令：设置口令（两次输入一致）后即可口令加密。");
+                                }
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("未设置口令：拿到程序的人都能解密")
+                                        .size(FS_NOTE)
+                                        .color(pal().text_muted),
+                                )
+                                .on_hover_text(
+                                    "仅防随手翻看，任何拿到程序的人都可解密；不推荐用于敏感文件。",
+                                );
+                                if ui.add(ghost_button("跳过口令，不设口令继续")).clicked() {
+                                    self.allow_no_pass = true;
+                                    self.log("已跳过口令：本次加密使用内置密钥（不推荐用于敏感文件）。");
+                                }
+                            }
+                        } else if self.passphrase != self.passphrase2 {
+                            ui.label(
+                                egui::RichText::new("两次输入的口令不一致")
+                                    .size(FS_NOTE)
+                                    .color(pal().busy_amber),
+                            );
+                        } else {
+                            // 口令强度实时评估：常见弱口令 / 长度 / 字符类
+                            let (lv, msg) = pass_strength(&self.passphrase);
+                            let color = match lv {
+                                2 => pal().accent_text,
+                                1 => pal().busy_amber,
+                                _ => pal().danger,
+                            };
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}（Argon2id）· 钥匙指纹 {}",
+                                    msg,
+                                    crypto::pass_fingerprint(&self.passphrase)
+                                ))
+                                .size(FS_NOTE)
+                                .color(color),
+                            )
+                            .on_hover_text(
+                                "同一条口令的指纹相同，可用于核对是否输错。口令遗忘后文件无法找回。",
+                            );
+                        }
+
+                        ui.add_space(SP_L);
+                        section_title(ui, "输出目录");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.out_dir)
+                                    .desired_width(width - 76.0)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            if ui.button("浏览…").clicked() {
+                                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                    self.out_dir = d.display().to_string();
+                                }
+                            }
+                        });
+
+                        ui.add_space(SP_L);
+                        // 自定义封面：跟随当前选中的外壳，各自记忆（存于 %APPDATA% 封面目录）
+                        let shell = SHELLS[self.shell];
+                        let custom = paths::custom_cover(shell).is_some();
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "封面：{}",
+                                    if custom { "自定义 ✔" } else { "内置随机" }
+                                ))
+                                .size(FS_NOTE)
+                                .color(if custom { pal().accent_text } else { pal().text_muted }),
+                            );
+                            if ui.add_enabled(!self.busy, ghost_button("自定义…")).clicked() {
+                                let (filter, exts): (&str, &[&str]) = match shell {
+                                    "jpg" => ("JPG 图片", &["jpg", "jpeg"]),
+                                    "docx" => ("DOCX 文档", &["docx"]),
+                                    _ => ("PNG 图片", &["png"]),
+                                };
+                                if let Some(p) =
+                                    rfd::FileDialog::new().add_filter(filter, exts).pick_file()
+                                {
+                                    match shells::validate_cover(shell, &p) {
+                                        Ok(()) => match paths::set_custom_cover(shell, &p) {
+                                            Ok(()) => self.log(&format!(
+                                                "已启用自定义封面（{} 外壳）：{}",
+                                                shell,
+                                                p.display()
+                                            )),
+                                            Err(e) => self.log(&format!("失败：{e}")),
+                                        },
                                         Err(e) => self.log(&format!("失败：{e}")),
-                                    },
+                                    }
+                                }
+                            }
+                            if custom
+                                && ui
+                                    .add_enabled(!self.busy, ghost_button("恢复默认"))
+                                    .clicked()
+                            {
+                                match paths::clear_custom_cover(shell) {
+                                    Ok(()) => self.log("已恢复内置随机封面。"),
                                     Err(e) => self.log(&format!("失败：{e}")),
                                 }
                             }
-                        }
-                        if custom
-                            && ui
-                                .add_enabled(!self.busy, ghost_button("恢复默认"))
-                                .clicked()
-                        {
-                            match paths::clear_custom_cover(shell) {
-                                Ok(()) => self.log("已恢复内置随机封面。"),
-                                Err(e) => self.log(&format!("失败：{e}")),
-                            }
-                        }
-                    });
-                    if let Some(p) = paths::custom_cover(shell) {
-                        ui.label(
-                            egui::RichText::new(format!("　└ {}", p.display()))
-                                .monospace()
-                                .size(9.5)
-                                .color(pal().text_faint),
-                        );
-                    }
-                    ui.add_space(4.0);
-                    ui.checkbox(
-                        &mut self.keep_name,
-                        "保留原文件名作为输出名（默认随机，不泄露原名）",
-                    );
-                });
-
-                // 操作按钮组固定在面板底部：用空白撑开后从上往下排
-                let busy = self.busy;
-                ui.columns(2, |cols| {
-                    let w0 = cols[0].available_width();
-                    let w1 = cols[1].available_width();
-                    if cols[0]
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new("文件").min_size(egui::vec2(w0, 30.0)),
-                        )
-                        .clicked()
-                    {
-                        if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let n = files.len();
-                            for f in files {
-                                self.items.push(f);
-                            }
-                            self.log(&format!("添加 {} 个文件", n));
-                        }
-                    }
-                    if cols[1]
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new("文件夹").min_size(egui::vec2(w1, 30.0)),
-                        )
-                        .clicked()
-                    {
-                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                            self.items.push(d);
-                            self.log("添加文件夹");
-                        }
-                    }
-                });
-
-                // 操作按钮组固定在面板底部：用空白撑开后从上往下排
-                let group_height = 106.0; // 开始加密36 + 间距6 + 还原34 + 间距4 + 移除/清空26
-                let remaining = ui.available_height();
-                if remaining > group_height + 16.0 {
-                    ui.add_space(remaining - group_height - 16.0);
-                }
-                let pass_ready = (!self.passphrase.is_empty()
-                    && self.passphrase == self.passphrase2)
-                    || self.allow_no_pass;
-                if ui
-                    .add_enabled(
-                        !self.busy && pass_ready,
-                        primary_button("开始加密（所选外壳）").min_size(egui::vec2(width, 36.0)),
-                    )
-                    .clicked()
-                {
-                    self.run_enc();
-                }
-                ui.add_space(6.0);
-                let dec_label = if self.vault_count > 0 {
-                    format!("还原 VaultGuard 文件（{}）", self.vault_count)
-                } else {
-                    "还原 VaultGuard 文件".to_string()
-                };
-                if ui.add_sized([width, 34.0], secondary_button(dec_label)).clicked() {
-                    self.run_dec();
-                }
-                ui.add_space(4.0);
-                ui.columns(3, |cols| {
-                    let ws = [
-                        cols[0].available_width(),
-                        cols[1].available_width(),
-                        cols[2].available_width(),
-                    ];
-                    if cols[0]
-                        .add_enabled(
-                            !self.sel.is_empty() && !self.busy,
-                            ghost_button("移除选中").min_size(egui::vec2(ws[0], 26.0)),
-                        )
-                        .clicked()
-                    {
-                        self.remove_selected();
-                    }
-                    if cols[1]
-                        .add_enabled(
-                            !self.items.is_empty() && !self.busy,
-                            ghost_button("清空列表").min_size(egui::vec2(ws[1], 26.0)),
-                        )
-                        .clicked()
-                    {
-                        self.items.clear();
-                        self.sel.clear();
-                        self.log("列表已清空");
-                    }
-                    if cols[2]
-                        .add_enabled(
-                            self.last_output.is_some(),
-                            ghost_button("分享说明").min_size(egui::vec2(ws[2], 26.0)),
-                        )
-                        .clicked()
-                    {
-                        let out = self.last_output.clone();
-                        if let Some(out) = out {
-                            // 口令会随文案进剪贴板（Win+V 剪贴板历史会留存），复制前确认
-                            if !self.passphrase.is_empty() {
-                                let ok = rfd::MessageDialog::new()
-                                    .set_title("分享说明")
-                                    .set_description(
-                                        "分享文案将包含口令并复制到剪贴板。\n注意：Windows 剪贴板历史（Win+V）会留存口令，用后建议清空剪贴板。\n\n是否继续？",
-                                    )
-                                    .set_buttons(rfd::MessageButtons::OkCancel)
-                                    .show();
-                                if ok != rfd::MessageDialogResult::Ok {
-                                    self.log("已取消复制分享说明。");
-                                    return;
-                                }
-                            }
-                            let pass_note = if self.passphrase.is_empty() {
-                                "（未设口令：内置密钥模式）".to_string()
-                            } else {
-                                self.passphrase.clone()
-                            };
-                            let text = format!(
-                                "【VaultGuard 分享说明】\n文件：{}\n口令：{}\n接收方步骤：打开 VaultGuard.exe → 拖入本文件 → 输入口令 → 还原。\n下载：https://github.com/AAAduck/VaultGuard/releases （或由发送方直接提供 VaultGuard.exe）\n安全提醒：口令请勿与文件走同一渠道发送；口令遗忘无法找回。",
-                                out.display(),
-                                pass_note
+                        });
+                        if let Some(p) = paths::custom_cover(shell) {
+                            ui.label(
+                                egui::RichText::new(format!("　└ {}", p.display()))
+                                    .monospace()
+                                    .size(FS_NOTE)
+                                    .color(pal().text_faint),
                             );
-                            cols[2].output_mut(|o| o.copied_text = text);
-                            self.log("分享说明已复制到剪贴板。");
                         }
-                    }
-                });
+                        ui.add_space(SP_XS);
+                        ui.checkbox(&mut self.keep_name, "保留原文件名作为输出名")
+                            .on_hover_text("默认随机命名，不泄露原文件名。");
+
+                    });
             });
     }
 
@@ -1218,38 +1305,47 @@ impl VaultApp {
             .frame(
                 egui::Frame::default()
                     .fill(pal().bg)
-                    .inner_margin(egui::Margin::same(12.0)),
+                    .inner_margin(egui::Margin::same(SP_L)),
             )
             .show(ctx, |ui| {
                 let dragging = ui.input(|i| !i.raw.hovered_files.is_empty());
 
                 // ── 口令到期提醒（90 天，可关闭/确认）──
                 if self.pass_tip_due {
+                    // 安全提醒保留（只在这条确实到期时出现，并非常驻），但去掉整圈琥珀描边、
+                    // 收窄上下内边距、按钮降档：仍看得见，不再抢走整页第一眼的注意力。
                     egui::Frame::default()
                         .fill(pal().warn_bg)
-                        .stroke(egui::Stroke::new(1.0_f32, pal().busy_amber))
-                        .rounding(8.0)
-                        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                        .rounding(R_SM)
+                        .inner_margin(egui::Margin::symmetric(PAD_X, SP_S))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new("距上次设置/更换口令已超过 90 天，建议更换。")
-                                        .size(11.0)
+                                        .size(FS_NOTE)
                                         .color(pal().busy_amber),
                                 );
-                                if ui.button("已更换口令").clicked() {
+                                if ui
+                                    .add(ghost_button_mini("已更换口令"))
+                                    .on_hover_text("记录为今天刚换过，90 天后再次提醒。")
+                                    .clicked()
+                                {
                                     paths::pass_tip_touch();
                                     self.pass_tip_due = false;
                                     self.log("口令更换时间已记录，90 天后再次提醒。");
                                 }
-                                if ui.button("关闭提醒").clicked() {
+                                if ui
+                                    .add(ghost_button_mini("关闭提醒"))
+                                    .on_hover_text("本次不再提醒；下次设置口令时自动恢复。")
+                                    .clicked()
+                                {
                                     paths::pass_tip_disable();
                                     self.pass_tip_due = false;
                                     self.log("口令更换提醒已关闭（下次设置口令时重新开启）。");
                                 }
                             });
                         });
-                    ui.add_space(8.0);
+                    ui.add_space(SP_S);
                 }
 
                 // ── 文件列表卡片 ──
@@ -1259,11 +1355,11 @@ impl VaultApp {
                         1.0_f32,
                         if dragging { pal().accent } else { pal().border },
                     ))
-                    .rounding(10.0)
-                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                    .rounding(R_MD)
+                    .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.add_space(4.0);
+                            ui.add_space(SP_XS);
                             ui.label(
                                 egui::RichText::new(format!(
                                     "待处理项目（{}）{}",
@@ -1274,30 +1370,30 @@ impl VaultApp {
                                         " —— 可直接把文件/文件夹拖进本窗口"
                                     }
                                 ))
-                                .size(11.5)
+                                .size(FS_SUB)
                                 .color(if dragging { pal().accent_text } else { pal().text_muted }),
                             );
                         });
-                        ui.add_space(2.0);
+                        ui.add_space(SP_XS);
                         egui::ScrollArea::vertical()
                             .id_source("items")
                             .max_height(ui.available_height() * 0.46)
                             .show(ui, |ui| {
                                 if self.items.is_empty() {
                                     ui.vertical_centered(|ui| {
-                                        ui.add_space(18.0);
+                                        ui.add_space(SP_XXL);
                                         ui.label(
                                             egui::RichText::new("把文件或文件夹拖进窗口")
-                                                .size(13.0)
+                                                .size(FS_BODY)
                                                 .color(pal().text_sub),
                                         );
-                                        ui.add_space(2.0);
+                                        ui.add_space(SP_XS);
                                         ui.label(
                                             egui::RichText::new("加密后的容器拖回来即可还原")
-                                                .size(11.0)
+                                                .size(FS_NOTE)
                                                 .color(pal().text_faint),
                                         );
-                                        ui.add_space(14.0);
+                                        ui.add_space(SP_XL);
                                     });
                                     return;
                                 }
@@ -1323,12 +1419,12 @@ impl VaultApp {
                             });
                     });
 
-                ui.add_space(10.0);
+                ui.add_space(SP_L);
 
                 // ── 选择性还原预览面板（解密就绪后出现）──
                 if self.dec_preview.is_some() {
                     self.ui_dec_preview(ui);
-                    ui.add_space(10.0);
+                    ui.add_space(SP_L);
                 }
 
                 // ── 上次输出快捷入口 ──
@@ -1336,25 +1432,25 @@ impl VaultApp {
                     egui::Frame::default()
                         .fill(pal().card)
                         .stroke(egui::Stroke::new(1.0_f32, pal().accent))
-                        .rounding(10.0)
-                        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                        .rounding(R_MD)
+                        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 if ui
-                                    .add(primary_button("打开输出目录").min_size(egui::vec2(0.0, 30.0)))
+                                    .add(primary_button("打开输出目录").min_size(egui::vec2(0.0, H_BTN_SEC)))
                                     .clicked()
                                 {
                                     open_in_explorer(out);
                                 }
                                 ui.label(
                                     egui::RichText::new(format!("上次输出: {}", out.display()))
-                                        .size(10.0)
+                                        .size(FS_NOTE)
                                         .color(pal().text_faint)
                                         .monospace(),
                                 );
                             });
                         });
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
                 }
 
                 error_card(ui, &mut self.last_error);
@@ -1373,21 +1469,21 @@ impl VaultApp {
         egui::Frame::default()
             .fill(pal().card)
             .stroke(egui::Stroke::new(1.0_f32, pal().accent))
-            .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .rounding(R_MD)
+            .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
                     ui.label(
                         egui::RichText::new(format!(
                             "解密预览（{} 个顶层条目）—— 勾选要落位的内容",
                             tops.len()
                         ))
-                        .size(11.5)
+                        .size(FS_SUB)
                         .color(pal().accent_text),
                     );
                 });
-                ui.add_space(2.0);
+                ui.add_space(SP_XS);
                 egui::ScrollArea::vertical()
                     .id_source("dec_preview")
                     .max_height(ui.available_height() * 0.30)
@@ -1411,13 +1507,13 @@ impl VaultApp {
                                 ui.label(
                                     egui::RichText::new(tag)
                                         .monospace()
-                                        .size(10.5)
+                                        .size(FS_NOTE)
                                         .color(pal().text_muted),
                                 );
                                 ui.label(
                                     egui::RichText::new(name)
                                         .monospace()
-                                        .size(11.5)
+                                        .size(FS_SUB)
                                         .color(pal().text),
                                 );
                                 ui.with_layout(
@@ -1430,7 +1526,7 @@ impl VaultApp {
                                                 paths::sz(*sz)
                                             })
                                             .monospace()
-                                            .size(10.0)
+                                            .size(FS_NOTE)
                                             .color(pal().text_faint),
                                         );
                                     },
@@ -1438,7 +1534,7 @@ impl VaultApp {
                             });
                         }
                     });
-                ui.add_space(4.0);
+                ui.add_space(SP_XS);
                 ui.horizontal(|ui| {
                     let sel_count = self.dec_sel.len();
                     let place_sel = ui.add_enabled(
@@ -1493,14 +1589,14 @@ impl VaultApp {
                 egui::Frame::default()
                     .fill(pal().panel)
                     .stroke(egui::Stroke::new(1.0_f32, pal().border))
-                    .inner_margin(egui::Margin::symmetric(14.0, 8.0)),
+                    .inner_margin(egui::Margin::symmetric(PAD_X, SP_S)),
             )
             .show(ctx, |ui| {
                 if self.vp.session.is_none() {
                     let width = ui.available_width();
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("保险箱").size(11.5).color(pal().text_sub));
+                        ui.spacing_mut().item_spacing.x = SP_S;
+                        ui.label(egui::RichText::new("保险箱").size(FS_SUB).color(pal().text_sub));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.path)
                                 .desired_width((width - 276.0).max(180.0))
@@ -1540,11 +1636,11 @@ impl VaultApp {
                             }
                         }
                     });
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SP_S;
                         let w = ui.available_width();
-                        ui.label(egui::RichText::new("口令").size(11.5).color(pal().text_sub));
+                        ui.label(egui::RichText::new("口令").size(FS_SUB).color(pal().text_sub));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.pass)
                                 .password(true)
@@ -1562,7 +1658,7 @@ impl VaultApp {
                     });
                     ui.label(
                         egui::RichText::new("新建需两次口令一致；打开已有保险箱只填第一格。口令遗忘后保险箱无法找回。")
-                            .size(9.5)
+                            .size(FS_NOTE)
                             .color(pal().text_faint),
                     );
                 } else {
@@ -1581,17 +1677,17 @@ impl VaultApp {
                         .map(|m| m.len())
                         .unwrap_or(0);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("已解锁").size(11.0).color(pal().accent_text));
-                        ui.label(egui::RichText::new(name).size(12.5).strong().color(pal().text));
+                        ui.spacing_mut().item_spacing.x = SP_S;
+                        ui.label(egui::RichText::new("已解锁").size(FS_NOTE).color(pal().accent_text));
+                        ui.label(egui::RichText::new(name).size(FS_BODY).strong().color(pal().text));
                         ui.label(
                             egui::RichText::new(format!("· {} 个条目 · 容器 {}", n, paths::sz(disk)))
-                                .size(11.0)
+                                .size(FS_NOTE)
                                 .color(pal().text_sub),
                         );
                         if legacy {
                             ui.label(
-                                egui::RichText::new("· VGS1 旧格式").size(10.5).color(pal().busy_amber),
+                                egui::RichText::new("· VGS1 旧格式").size(FS_NOTE).color(pal().busy_amber),
                             );
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1624,16 +1720,16 @@ impl VaultApp {
                 egui::Frame::default()
                     .fill(pal().panel)
                     .stroke(egui::Stroke::new(1.0_f32, pal().border))
-                    .inner_margin(egui::Margin::symmetric(14.0, 6.0)),
+                    .inner_margin(egui::Margin::symmetric(PAD_X, SP_S)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = SP_S;
                     if busy {
-                        ui.add(egui::Spinner::new().size(11.0));
+                        ui.add(egui::Spinner::new().size(ICON_S));
                         ui.label(
                             egui::RichText::new(format!("{}…", stage))
-                                .size(11.0)
+                                .size(FS_NOTE)
                                 .color(pal().busy_amber),
                         );
                         if let Some(p) = progress {
@@ -1646,17 +1742,17 @@ impl VaultApp {
                             );
                         }
                         if let Some(c) = &cancel {
-                            ui.add_space(6.0);
+                            ui.add_space(SP_S);
                             cancel_button(ui, c);
                         }
                         ui.label(
                             egui::RichText::new("期间请勿断电或关闭程序")
-                                .size(10.0)
+                                .size(FS_NOTE)
                                 .color(pal().text_faint),
                         );
                     } else {
-                        ui.label(egui::RichText::new("就绪").size(11.0).color(pal().text_muted));
-                        ui.label(egui::RichText::new(tail).size(10.5).color(pal().text_faint));
+                        ui.label(egui::RichText::new("就绪").size(FS_NOTE).color(pal().text_muted));
+                        ui.label(egui::RichText::new(tail).size(FS_NOTE).color(pal().text_faint));
                     }
                 });
             });
@@ -1667,34 +1763,34 @@ impl VaultApp {
         egui::Frame::default()
             .fill(pal().card)
             .stroke(egui::Stroke::new(1.0_f32, pal().border))
-            .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+            .rounding(R_MD)
+            .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
             .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new("开始使用隐私保险箱")
-                        .size(13.0)
+                        .size(FS_BODY)
                         .strong()
                         .color(pal().text),
                 );
-                ui.add_space(6.0);
+                ui.add_space(SP_S);
                 for s in [
                     "1. 在上方填写 .vgsafe 的保存路径，或点「浏览…」选一个已有的保险箱。",
                     "2. 设置口令：新建需两次输入一致；打开已有保险箱只填第一格。",
                     "3. 点「新建」创建空保险箱，或点「打开」解锁。",
                 ] {
-                    ui.label(egui::RichText::new(s).size(11.5).color(pal().text_sub));
-                    ui.add_space(3.0);
+                    ui.label(egui::RichText::new(s).size(FS_SUB).color(pal().text_sub));
+                    ui.add_space(SP_XS);
                 }
-                ui.add_space(4.0);
+                ui.add_space(SP_XS);
                 ui.label(
                     egui::RichText::new(
                         "一个 .vgsafe 就是一个文件：可放网盘、U 盘、邮件附件；解锁后才显示其中的条目。",
                     )
-                    .size(10.5)
+                    .size(FS_NOTE)
                     .color(pal().text_muted),
                 );
             });
-        ui.add_space(10.0);
+        ui.add_space(SP_L);
         error_card(ui, &mut self.last_error);
         log_panel(ui, &self.logs);
     }
@@ -1714,10 +1810,10 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new(format!("当前：{}", from))
                             .monospace()
-                            .size(11.0)
+                            .size(FS_NOTE)
                             .color(pal().text_sub),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.vp.ren_val)
                             .desired_width(300.0)
@@ -1726,15 +1822,15 @@ impl VaultApp {
                     if ui.memory(|m| m.focused().is_none()) {
                         r.request_focus();
                     }
-                    ui.add_space(3.0);
+                    ui.add_space(SP_XS);
                     ui.label(
                         egui::RichText::new("只改名字、不改所在目录；移动位置请用「移动」。")
-                            .size(9.5)
+                            .size(FS_NOTE)
                             .color(pal().text_faint),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(SP_S);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SP_S;
                         let ready = can && !from.is_empty() && !self.vp.ren_val.trim().is_empty();
                         if ui.add_enabled(ready, b_primary("确定重命名")).clicked() {
                             let to = self.vp.ren_val.trim().to_string();
@@ -1764,10 +1860,10 @@ impl VaultApp {
                     ui.label(
                         egui::RichText::new(format!("当前：{}", name))
                             .monospace()
-                            .size(11.0)
+                            .size(FS_NOTE)
                             .color(pal().text_sub),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.vp.mv_val)
                             .desired_width(300.0)
@@ -1777,15 +1873,15 @@ impl VaultApp {
                     if ui.memory(|m| m.focused().is_none()) {
                         r.request_focus();
                     }
-                    ui.add_space(3.0);
+                    ui.add_space(SP_XS);
                     ui.label(
                         egui::RichText::new("目标目录不存在会自动创建；重名自动加 _2/_3 后缀。")
-                            .size(9.5)
+                            .size(FS_NOTE)
                             .color(pal().text_faint),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(SP_S);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SP_S;
                         if ui
                             .add_enabled(can && !name.is_empty(), b_primary("确定移动"))
                             .clicked()
@@ -1815,10 +1911,10 @@ impl VaultApp {
                 .show(ctx, |ui| {
                     ui.label(
                         egui::RichText::new("更换会重写整个容器；口令遗忘后保险箱无法打开。")
-                            .size(10.5)
+                            .size(FS_NOTE)
                             .color(pal().text_sub),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.vp.pass)
                             .password(true)
@@ -1836,13 +1932,13 @@ impl VaultApp {
                     if !self.vp.pass.is_empty() && self.vp.pass != self.vp.pass2 {
                         ui.label(
                             egui::RichText::new("两次输入的新口令不一致")
-                                .size(9.5)
+                                .size(FS_NOTE)
                                 .color(pal().busy_amber),
                         );
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(SP_S);
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SP_S;
                         let ready = can && !self.vp.pass.is_empty() && self.vp.pass == self.vp.pass2;
                         if ui.add_enabled(ready, b_primary("应用新口令")).clicked() {
                             let new_pass = self.vp.pass.clone();
@@ -1952,7 +2048,7 @@ impl VaultApp {
             .frame(
                 egui::Frame::default()
                     .fill(pal().bg)
-                    .inner_margin(egui::Margin::same(12.0)),
+                    .inner_margin(egui::Margin::same(SP_L)),
             )
             .show(ctx, |ui| {
                 if self.vp.session.is_none() {
@@ -1971,13 +2067,13 @@ impl VaultApp {
                     egui::Frame::default()
                         .fill(pal().card)
                         .stroke(egui::Stroke::new(1.0_f32, pal().busy_amber))
-                        .rounding(8.0)
-                        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                        .rounding(R_SM)
+                        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(
                                     egui::RichText::new("此保险箱为旧 VGS1 格式；第一次保存会升级为 VGS2，旧格式仍可由新版打开。")
-                                        .size(10.5)
+                                        .size(FS_NOTE)
                                         .color(pal().busy_amber),
                                 );
                                 if ui.add(b_ghost("确认后允许升级保存")).clicked() {
@@ -1985,7 +2081,7 @@ impl VaultApp {
                                 }
                             });
                         });
-                    ui.add_space(6.0);
+                    ui.add_space(SP_S);
                 }
 
                 // 列表交互动作（P1）：在渲染闭包外统一应用，避免与 session 的不可变借用冲突。
@@ -1995,10 +2091,10 @@ impl VaultApp {
                 let _ = ui.add_enabled_ui(!busy, |ui| {
                     // ── 工具行：4 个主操作 + 「更多 ▾」（P0-1 操作分层）──
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SP_S;
                         ui.add_enabled_ui(can_mutate, |ui| {
                             ui.menu_button(
-                                egui::RichText::new("添加 ▾").size(12.0).color(pal().text),
+                                egui::RichText::new("添加 ▾").size(FS_SUB).color(pal().text),
                                 |ui| {
                                     if ui.button("添加文件…").clicked() {
                                         ui.close_menu();
@@ -2027,7 +2123,7 @@ impl VaultApp {
                         });
                         ui.add_enabled_ui(!busy, |ui| {
                             ui.menu_button(
-                                egui::RichText::new("导出 ▾").size(12.0).color(pal().text),
+                                egui::RichText::new("导出 ▾").size(FS_SUB).color(pal().text),
                                 |ui| {
                                     if ui.button("导出全部…").clicked() {
                                         ui.close_menu();
@@ -2080,7 +2176,7 @@ impl VaultApp {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.menu_button(
-                                egui::RichText::new("更多 ▾").size(12.0).color(pal().text_sub),
+                                egui::RichText::new("更多 ▾").size(FS_SUB).color(pal().text_sub),
                                 |ui| {
                                     let one = self.vp.sel.len() == 1;
                                     if ui
@@ -2125,7 +2221,7 @@ impl VaultApp {
                             );
                         });
                     });
-                    ui.add_space(6.0);
+                    ui.add_space(SP_S);
 
                     // ── 就地二次确认（P0-4：不用弹窗，不离开当前版面）──
                     if self.vp.confirm_remove {
@@ -2133,17 +2229,17 @@ impl VaultApp {
                         egui::Frame::default()
                             .fill(pal().card)
                             .stroke(egui::Stroke::new(1.0_f32, pal().danger))
-                            .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                            .rounding(R_SM)
+                            .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.spacing_mut().item_spacing.x = SP_S;
                                     ui.label(
                                         egui::RichText::new(format!(
                                             "确认从保险箱移除 {} 个条目？移除后可用「压缩」回收空间。",
                                             n
                                         ))
-                                        .size(11.0)
+                                        .size(FS_NOTE)
                                         .color(pal().danger),
                                     );
                                     if ui
@@ -2161,7 +2257,7 @@ impl VaultApp {
                                     }
                                 });
                             });
-                        ui.add_space(6.0);
+                        ui.add_space(SP_S);
                     }
                     if self.vp.confirm_compact {
                         let disk = std::fs::metadata(self.vp.path.trim())
@@ -2170,17 +2266,17 @@ impl VaultApp {
                         egui::Frame::default()
                             .fill(pal().card)
                             .stroke(egui::Stroke::new(1.0_f32, pal().busy_amber))
-                            .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                            .rounding(R_SM)
+                            .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.spacing_mut().item_spacing.x = SP_S;
                                     ui.label(
                                         egui::RichText::new(format!(
                                             "压缩会重写整个容器（当前 {}）以回收空间，期间请勿断电或关闭程序。",
                                             paths::sz(disk)
                                         ))
-                                        .size(11.0)
+                                        .size(FS_NOTE)
                                         .color(pal().busy_amber),
                                     );
                                     if ui.add_enabled(can_mutate, b_primary("开始压缩")).clicked() {
@@ -2192,12 +2288,12 @@ impl VaultApp {
                                     }
                                 });
                             });
-                        ui.add_space(6.0);
+                        ui.add_space(SP_S);
                     }
 
                     // ── 过滤 / 视图 / 排序（P1-1/2/4）──
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = SP_S;
                         let f = ui.add(
                             egui::TextEdit::singleline(&mut self.vp.filter)
                                 .desired_width(170.0)
@@ -2231,7 +2327,7 @@ impl VaultApp {
                             self.vp.sort_desc = !self.vp.sort_desc;
                         }
                     });
-                    ui.add_space(4.0);
+                    ui.add_space(SP_XS);
 
                     let visible = self.vp.visible_indices();
                     let total = self
@@ -2243,11 +2339,11 @@ impl VaultApp {
                     egui::Frame::default()
                         .fill(pal().card)
                         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-                        .rounding(10.0)
-                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                        .rounding(R_MD)
+                        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.add_space(4.0);
+                                ui.add_space(SP_XS);
                                 ui.label(
                                     egui::RichText::new(if visible.len() == total {
                                         format!("保险箱内容（{} 个条目）", total)
@@ -2258,7 +2354,7 @@ impl VaultApp {
                                             total
                                         )
                                     })
-                                    .size(11.5)
+                                    .size(FS_SUB)
                                     .color(pal().text_muted),
                                 );
                                 ui.with_layout(
@@ -2269,7 +2365,7 @@ impl VaultApp {
                                                 "已选 {}",
                                                 self.vp.sel.len()
                                             ))
-                                            .size(10.5)
+                                            .size(FS_NOTE)
                                             .color(pal().text_faint),
                                         );
                                         if ui.add(b_ghost("清空选择")).clicked() {
@@ -2291,32 +2387,32 @@ impl VaultApp {
                                     },
                                 );
                             });
-                            ui.add_space(2.0);
+                            ui.add_space(SP_XS);
                             let Some(sess) = self.vp.session.as_ref() else {
                                 return;
                             };
                             let entries: &[safe::Entry] = &sess.entries;
                             if entries.is_empty() {
                                 ui.vertical_centered(|ui| {
-                                    ui.add_space(14.0);
+                                    ui.add_space(SP_XL);
                                     ui.label(
                                         egui::RichText::new("保险箱是空的：点上方「添加 ▾」放入文件或文件夹")
-                                            .size(12.0)
+                                            .size(FS_SUB)
                                             .color(pal().text_sub),
                                     );
-                                    ui.add_space(10.0);
+                                    ui.add_space(SP_L);
                                 });
                                 return;
                             }
                             if visible.is_empty() {
                                 ui.vertical_centered(|ui| {
-                                    ui.add_space(14.0);
+                                    ui.add_space(SP_XL);
                                     ui.label(
                                         egui::RichText::new("没有匹配的条目：清空过滤条件可看全部")
-                                            .size(12.0)
+                                            .size(FS_SUB)
                                             .color(pal().text_sub),
                                     );
-                                    ui.add_space(10.0);
+                                    ui.add_space(SP_L);
                                 });
                                 return;
                             }
@@ -2371,7 +2467,7 @@ impl VaultApp {
                     }
                 }
 
-                ui.add_space(10.0);
+                ui.add_space(SP_L);
                 error_card(ui, &mut self.last_error);
                 log_panel(ui, &self.logs);
             });
@@ -2429,7 +2525,7 @@ fn draw_row(
 ) {
     let e = &entries[idx];
     let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 22.0),
+        egui::vec2(ui.available_width(), ROW_H),
         egui::Sense::click(),
     );
     let selected = cx.sel.contains(&idx);
@@ -2591,7 +2687,7 @@ fn draw_tree(
         };
         egui::CollapsingHeader::new(
             egui::RichText::new(format!("{}（{}）", seg, child.count()))
-                .size(11.5)
+                .size(FS_SUB)
                 .color(pal().text_sub),
         )
         .id_source(format!("tree:{}", path))
@@ -2612,9 +2708,11 @@ fn draw_tree(
 }
 
 
+/// 区块小标题。改造前是「比正文小 2px 且和说明文字同色」——读者分不出这是标题。
+/// 现在提亮一档（text_sub）、比正文只小 1px，区块分界清晰但不喧哗。
 fn section_title(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(11.0).strong().color(pal().text_muted));
-    ui.add_space(3.0);
+    ui.label(egui::RichText::new(text).size(FS_SUB).strong().color(pal().text_sub));
+    ui.add_space(SP_S);
 }
 
 /// 口令强度评估：返回 (强度级 0弱/1中/2强, 说明)。
@@ -2672,21 +2770,23 @@ fn shell_card(
             1.0_f32,
             if active { pal().accent } else { pal().border },
         ))
-        .rounding(8.0)
-        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+        .rounding(R_SM)
+        // 外壳卡片刻意收窄：内边距与两行间距都取最小档，卡片更轻、更不占左栏
+        .inner_margin(egui::Margin::symmetric(SP_S + SP_XS, SP_S))
         .show(ui, |inner| {
+            inner.spacing_mut().item_spacing.y = SP_XS;
             inner.horizontal(|h| {
                 h.label(
                     egui::RichText::new(name)
-                        .size(12.5)
+                        .size(FS_SUB)
                         .strong()
                         .color(if active { pal().accent_text } else { pal().text }),
                 );
                 h.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
-                    r.label(egui::RichText::new(badge).monospace().size(9.5).color(pal().text_faint));
+                    r.label(egui::RichText::new(badge).monospace().size(FS_NOTE).color(pal().text_faint));
                 });
             });
-            inner.label(egui::RichText::new(desc).size(10.5).color(pal().text_muted));
+            inner.label(egui::RichText::new(desc).size(FS_NOTE).color(pal().text_muted));
             content_rect = inner.min_rect();
         });
     let resp = ui.interact(content_rect, egui::Id::new(id), egui::Sense::click());
@@ -2709,17 +2809,17 @@ fn item_row(
     let selected = sel.contains(&i);
     let mut action = RowAction::None;
     ui.horizontal(|ui| {
-        ui.add_space(4.0);
+        ui.add_space(SP_XS);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
         ui.painter()
             .rect_filled(rect, 2.0, if is_dir { pal().dir_sky } else { pal().text_muted });
-        let name_w = (ui.available_width() - 132.0).max(80.0);
+        let name_w = (ui.available_width() - ROW_META_W).max(80.0);
         let name_text = egui::RichText::new(p.display().to_string())
             .monospace()
-            .size(11.5)
+            .size(FS_SUB)
             .color(if is_dir { pal().text_sub } else { pal().text });
         let resp = ui.add_sized(
-            [name_w, 20.0],
+            [name_w, ROW_H],
             egui::SelectableLabel::new(selected, name_text),
         );
         if resp.clicked() {
@@ -2733,18 +2833,18 @@ fn item_row(
             egui::Frame::default()
                 .fill(pal().accent_dim)
                 .stroke(egui::Stroke::new(1.0_f32, pal().accent))
-                .rounding(4.0)
-                .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                .rounding(R_CHIP)
+                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
                 .show(ui, |chip| {
                     chip.label(
                         egui::RichText::new("VaultGuard")
                             .monospace()
-                            .size(9.0)
+                            .size(FS_NOTE)
                             .color(pal().accent_text),
                     );
                 });
         } else {
-            ui.add_space(74.0);
+            ui.add_space(ROW_BADGE_W);
         }
         let size = if is_dir {
             "-".to_string()
@@ -2753,7 +2853,7 @@ fn item_row(
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
             if r.add(
-                egui::Button::new(egui::RichText::new("×").size(12.0).color(pal().text_muted))
+                egui::Button::new(egui::RichText::new("×").size(FS_SUB).color(pal().text_muted))
                     .fill(Color32::TRANSPARENT)
                     .stroke(egui::Stroke::NONE)
                     .small(),
@@ -2763,7 +2863,7 @@ fn item_row(
             {
                 action = RowAction::Remove;
             }
-            r.label(egui::RichText::new(size).monospace().size(10.0).color(pal().text_faint));
+            r.label(egui::RichText::new(size).monospace().size(FS_NOTE).color(pal().text_faint));
         });
     });
     action
@@ -2784,21 +2884,21 @@ fn log_card(
     egui::Frame::default()
         .fill(pal().card)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-        .rounding(10.0)
-        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .rounding(R_MD)
+        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("日志").size(11.5).color(pal().text_muted));
+                ui.add_space(SP_XS);
+                ui.label(egui::RichText::new("日志").size(FS_SUB).color(pal().text_muted));
                 if busy {
-                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.add(egui::Spinner::new().size(ICON_S));
                     ui.label(
                         egui::RichText::new("后台处理中…")
-                            .size(11.5)
+                            .size(FS_SUB)
                             .color(pal().busy_amber),
                     );
                     if let Some(c) = cancel {
-                        ui.add_space(6.0);
+                        ui.add_space(SP_S);
                         cancel_button(ui, c);
                     }
                 }
@@ -2811,7 +2911,7 @@ fn log_card(
                     );
                 }
             });
-            ui.add_space(2.0);
+            ui.add_space(SP_XS);
             egui::ScrollArea::vertical()
                 .id_source("logs")
                 .stick_to_bottom(true)
@@ -2821,7 +2921,7 @@ fn log_card(
                         ui.label(
                             egui::RichText::new(l)
                                 .monospace()
-                                .size(11.5)
+                                .size(FS_SUB)
                                 .color(log_color(l)),
                         );
                     }
@@ -2838,22 +2938,22 @@ fn error_card(ui: &mut egui::Ui, err: &mut Option<String>) {
     egui::Frame::default()
         .fill(pal().card)
         .stroke(egui::Stroke::new(1.0_f32, pal().danger))
-        .rounding(8.0)
-        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+        .rounding(R_SM)
+        .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.x = SP_S;
                 ui.label(
                     egui::RichText::new("上一步失败")
-                        .size(11.5)
+                        .size(FS_SUB)
                         .strong()
                         .color(pal().danger),
                 );
-                ui.label(egui::RichText::new(msg.clone()).size(11.0).color(pal().text));
+                ui.label(egui::RichText::new(msg.clone()).size(FS_NOTE).color(pal().text));
             });
-            ui.add_space(4.0);
+            ui.add_space(SP_XS);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.x = SP_S;
                 if ui.add(b_ghost("复制详情")).clicked() {
                     ui.output_mut(|o| o.copied_text = msg.clone());
                 }
@@ -2862,14 +2962,14 @@ fn error_card(ui: &mut egui::Ui, err: &mut Option<String>) {
                 }
             });
         });
-    ui.add_space(8.0);
+    ui.add_space(SP_S);
 }
 
 /// 日志面板（P0-5）：折叠收起，不再和进度条挤在同一个卡片里。
 fn log_panel(ui: &mut egui::Ui, logs: &[String]) {
     egui::CollapsingHeader::new(
         egui::RichText::new(format!("日志（{} 行）", logs.len()))
-            .size(11.5)
+            .size(FS_SUB)
             .color(pal().text_muted),
     )
     .id_source("logs_panel")
@@ -2878,8 +2978,8 @@ fn log_panel(ui: &mut egui::Ui, logs: &[String]) {
         egui::Frame::default()
             .fill(pal().card)
             .stroke(egui::Stroke::new(1.0_f32, pal().border))
-            .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .rounding(R_MD)
+            .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_source("logs_scroll")
@@ -2891,7 +2991,7 @@ fn log_panel(ui: &mut egui::Ui, logs: &[String]) {
                             ui.label(
                                 egui::RichText::new(l)
                                     .monospace()
-                                    .size(11.5)
+                                    .size(FS_SUB)
                                     .color(log_color(l)),
                             );
                         }
@@ -2918,29 +3018,29 @@ const BTN_H: f32 = 28.0;
 fn b_primary(text: &str) -> egui::Button<'static> {
     egui::Button::new(
         egui::RichText::new(text)
-            .size(12.0)
+            .size(FS_SUB)
             .strong()
             .color(pal().on_accent),
     )
     .fill(pal().accent)
     .stroke(egui::Stroke::NONE)
-    .rounding(7.0)
+    .rounding(R_SM)
     .min_size(egui::vec2(0.0, BTN_H))
 }
 
 fn b_secondary(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(12.0).color(pal().text))
+    egui::Button::new(egui::RichText::new(text).size(FS_SUB).color(pal().text))
         .fill(pal().card_hover)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-        .rounding(7.0)
+        .rounding(R_SM)
         .min_size(egui::vec2(0.0, BTN_H))
 }
 
 fn b_ghost(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(11.5).color(pal().text))
+    egui::Button::new(egui::RichText::new(text).size(FS_SUB).color(pal().text))
         .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-        .rounding(7.0)
+        .rounding(R_SM)
         .min_size(egui::vec2(0.0, BTN_H))
 }
 
@@ -2948,14 +3048,14 @@ fn b_ghost(text: &str) -> egui::Button<'static> {
 /// 点击只是置位令牌，长任务在下一个检查点停下，容器与已有产物保持原状。
 fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
     if c.is_cancelled() {
-        ui.label(egui::RichText::new("正在取消…").size(11.0).color(pal().danger));
+        ui.label(egui::RichText::new("正在取消…").size(FS_NOTE).color(pal().danger));
         return;
     }
-    let btn = egui::Button::new(egui::RichText::new("取消").size(11.5).color(pal().text))
+    let btn = egui::Button::new(egui::RichText::new("取消").size(FS_SUB).color(pal().text))
         .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-        .rounding(6.0)
-        .min_size(egui::vec2(52.0, 22.0));
+        .rounding(R_SM)
+        .min_size(egui::vec2(52.0, H_BTN_SM));
     if ui
         .add(btn)
         .on_hover_text("在当前检查点停下；容器与已有产物保持原状")
@@ -2966,19 +3066,19 @@ fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
 }
 
 fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(13.0).strong().color(pal().on_accent))
+    egui::Button::new(egui::RichText::new(text).size(FS_BODY).strong().color(pal().on_accent))
         .fill(pal().accent)
         .stroke(egui::Stroke::NONE)
-        .rounding(8.0)
-        .min_size(egui::vec2(0.0, 34.0))
+        .rounding(R_SM)
+        .min_size(egui::vec2(0.0, H_BTN_MAIN))
 }
 
 fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(12.5).color(pal().text))
+    egui::Button::new(egui::RichText::new(text).size(FS_BODY).color(pal().text))
         .fill(pal().card_hover)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-        .rounding(8.0)
-        .min_size(egui::vec2(0.0, 32.0))
+        .rounding(R_SM)
+        .min_size(egui::vec2(0.0, H_BTN_SEC))
 }
 
 /// 顶栏页签：选中态用实心强调色 + 白字（默认 selectable_label 的选中态是
@@ -2991,21 +3091,31 @@ fn tab_button(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
         (p.text_sub, Color32::TRANSPARENT, egui::Stroke::new(1.0_f32, p.border))
     };
     ui.add(
-        egui::Button::new(egui::RichText::new(text).size(12.5).color(fg))
+        egui::Button::new(egui::RichText::new(text).size(FS_BODY).color(fg))
             .fill(bg)
             .stroke(stroke)
-            .rounding(7.0)
-            .min_size(egui::vec2(0.0, 26.0)),
+            .rounding(R_SM)
+            .min_size(egui::vec2(0.0, H_BTN)),
     )
     .clicked()
 }
 
 fn ghost_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).size(11.5).color(pal().text))
+    egui::Button::new(egui::RichText::new(text).size(FS_SUB).color(pal().text))
         .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
-        .rounding(7.0)
-        .min_size(egui::vec2(0.0, 26.0))
+        .rounding(R_SM)
+        .min_size(egui::vec2(0.0, H_BTN))
+}
+
+/// 次级操作按钮：比 ghost 再矮一档、字号小一档、字色更淡，
+/// 保留描边（hover 时仍有边框可辨认），只降权不隐藏。
+fn ghost_button_mini(text: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text).size(FS_NOTE).color(pal().text_sub))
+        .fill(Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0_f32, pal().border))
+        .rounding(R_SM)
+        .min_size(egui::vec2(0.0, H_BTN_SM))
 }
 
 /// 保险箱后台任务执行器（在 worker 线程中运行）。会话经由通道传回。
@@ -3227,8 +3337,8 @@ impl eframe::App for VaultApp {
 pub fn run() {
     // 标题栏/任务栏图标取自 exe 内嵌的图标资源（RT_GROUP_ICON id=1，见 build.rs）
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([960.0, 640.0])
-        .with_min_inner_size([760.0, 520.0]);
+        .with_inner_size([WINDOW_W, WINDOW_H])
+        .with_min_inner_size([MIN_WINDOW_W, MIN_WINDOW_H]);
     if let Some(icon) = load_window_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -3293,7 +3403,7 @@ fn build_style() -> egui::Style {
     v.extreme_bg_color = pal().extreme_bg;
     v.faint_bg_color = pal().faint_bg;
     v.window_stroke = egui::Stroke::new(1.0_f32, pal().border);
-    v.window_rounding = egui::Rounding::same(10.0);
+    v.window_rounding = egui::Rounding::same(R_MD);
     // 拖选高亮：默认 accent_dim 只有 10% 透明度，选中范围几乎看不出
     v.selection.bg_fill = pal().sel_bg;
     v.selection.stroke = egui::Stroke::new(1.0_f32, pal().accent);
@@ -3318,26 +3428,28 @@ fn build_style() -> egui::Style {
     // 禁用文字会糊成一片；改成面板底色，禁用态 = 「淡一档」而不是「看不见」。
     v.widgets.noninteractive.weak_bg_fill = pal().panel;
 
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    style.spacing.interact_size = egui::vec2(60.0, 28.0);
-    style.spacing.menu_margin = egui::Margin::same(6.0);
+    // 控件之间留 10px（原 8px）——控件不再互相挨着，是「不挤」的第一来源
+    style.spacing.item_spacing = egui::vec2(SP_S + 2.0, SP_S + 2.0);
+    style.spacing.button_padding = egui::vec2(14.0, 9.0);
+    // 输入类控件高度统一到 30px（原 28px），文字与边框之间有余量
+    style.spacing.interact_size = egui::vec2(64.0, 30.0);
+    style.spacing.menu_margin = egui::Margin::same(SP_S);
 
     style
         .text_styles
-        .insert(egui::TextStyle::Heading, egui::FontId::proportional(16.0));
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(FS_TITLE + 1.0));
     style
         .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(FS_BODY));
     style
         .text_styles
-        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(FS_BODY));
     style
         .text_styles
-        .insert(egui::TextStyle::Small, egui::FontId::proportional(11.0));
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(FS_NOTE));
     style
         .text_styles
-        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.0));
+        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(FS_SUB));
 
     style
 }
