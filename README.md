@@ -133,7 +133,7 @@ VaultGuard.exe "D:\资料\项目文件夹" --png --password-stdin
 
 ### 构建与源码
 
-源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 40 个自动化测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱生命周期、选择性还原、目录整理、VGS2 测试向量、追加保存、损坏回退、压缩与 VGS1 升级、段级并行加密/分批转发）。
+源码在 `VaultGuard_rs/`，构建说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。`cargo test --release` 包含 46 个自动化测试（3 容器 × v2/v3、目录、中文名、二进制、错误口令、保险箱生命周期、选择性还原、目录整理、VGS2 测试向量、追加保存、损坏回退、压缩与 VGS1 升级、段级并行加密/分批转发、增量段级 GC、长任务取消）。
 
 ### 文件说明
 
