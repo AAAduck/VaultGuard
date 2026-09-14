@@ -136,6 +136,31 @@ const BTN_PAD_Y: f32 = 9.0;
 /// 交互控件最小宽度（egui Style 层）
 const W_INTERACT: f32 = 64.0;
 
+// 文件行自绘几何：原先直接写在 draw_row 里（8 / 3.5 / 14 / 10 / 54 / 20）
+/// 行内左右内边距
+const ROW_PAD_L: f32 = 8.0;
+const ROW_PAD_R: f32 = 10.0;
+/// 类型圆点右缘到文件名的间距
+const ROW_DOT_GAP: f32 = 14.0;
+/// 名称右侧为文件大小文字预留的宽度
+const ROW_SIZE_W: f32 = 54.0;
+/// 名称列的最小可见宽度（窗口极窄时仍留一段可读文字）
+const ROW_NAME_MIN: f32 = 20.0;
+/// item_row 里名称列宽的下限
+const W_NAME_MIN: f32 = 80.0;
+
+// 宽度预留：与输入框并排的控件占位，原先散在各处的经验值
+/// 输入框右侧一个次级按钮的占位宽（含控件间距；原 74 / 76 两处统一取值）
+const W_SLOT_BTN: f32 = 76.0;
+/// 两个并排口令框各自的右侧余量
+const W_SLOT_HALF: f32 = 56.0;
+/// 保险箱路径框右侧三按钮（新建 / 打开 / 浏览…）的占位宽
+const W_SLOT_VAULT_BTNS: f32 = 276.0;
+/// 输入框最小宽度
+const W_INPUT_MIN: f32 = 180.0;
+/// 右键菜单最小宽度
+const W_MENU_MIN: f32 = 150.0;
+
 // ── 主题与配色：深色 / 浅色两套令牌（对齐退役 React 版的 tailwind 配色）──
 
 /// 界面主题。选择持久化在注册表 `HKCU\Software\VaultGuard\theme`。
@@ -942,7 +967,7 @@ impl VaultApp {
                             .add(
                                 egui::Button::new(
                                     egui::RichText::new(self.theme.switch_label())
-                                        .size(FS_SUB)
+                                        .size(FS_BODY)
                                         .color(pal().text_sub),
                                 )
                                 .fill(Color32::TRANSPARENT)
@@ -1156,7 +1181,7 @@ impl VaultApp {
                                 egui::TextEdit::singleline(&mut self.passphrase)
                                     .password(!self.show_pass)
                                     .hint_text("输入口令")
-                                    .desired_width(width - 74.0)
+                                    .desired_width(width - W_SLOT_BTN)
                                     .font(egui::TextStyle::Monospace),
                             );
                             if ui
@@ -1174,7 +1199,7 @@ impl VaultApp {
                             egui::TextEdit::singleline(&mut self.passphrase2)
                                 .password(true)
                                 .hint_text("再次输入口令确认")
-                                .desired_width(width - 4.0)
+                                .desired_width(width - SP_XS)
                                 .font(egui::TextStyle::Monospace),
                         );
                         ui.add_space(SP_XS);
@@ -1257,10 +1282,10 @@ impl VaultApp {
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.out_dir)
-                                    .desired_width(width - 76.0)
+                                    .desired_width(width - W_SLOT_BTN)
                                     .font(egui::TextStyle::Monospace),
                             );
-                            if ui.button("浏览…").clicked() {
+                            if ui.add(b_ghost("浏览…")).clicked() {
                                 if let Some(d) = rfd::FileDialog::new().pick_folder() {
                                     self.out_dir = d.display().to_string();
                                 }
@@ -1624,7 +1649,7 @@ impl VaultApp {
                         ui.label(egui::RichText::new("保险箱").size(FS_SUB).color(pal().text_sub));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.path)
-                                .desired_width((width - 276.0).max(180.0))
+                                .desired_width((width - W_SLOT_VAULT_BTNS).max(W_INPUT_MIN))
                                 .font(egui::TextStyle::Monospace)
                                 .hint_text(r"D:\…\我的保险箱.vgsafe"),
                         );
@@ -1669,14 +1694,14 @@ impl VaultApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.pass)
                                 .password(true)
-                                .desired_width(w / 2.0 - 56.0)
+                                .desired_width(w / 2.0 - W_SLOT_HALF)
                                 .font(egui::TextStyle::Monospace)
                                 .hint_text("口令（新建与打开共用）"),
                         );
                         ui.add(
                             egui::TextEdit::singleline(&mut self.vp.pass2)
                                 .password(true)
-                                .desired_width(w / 2.0 - 56.0)
+                                .desired_width(w / 2.0 - W_SLOT_HALF)
                                 .font(egui::TextStyle::Monospace)
                                 .hint_text("确认口令（新建必填，打开可留空）"),
                         );
@@ -2557,20 +2582,20 @@ fn draw_row(
     } else if resp.hovered() {
         ui.painter().rect_filled(rect, R_CHIP, pal().card_hover);
     }
-    let dot_x = rect.left() + 8.0 + indent;
+    let dot_x = rect.left() + ROW_PAD_L + indent;
     let dot = egui::Rect::from_center_size(
-        egui::pos2(dot_x + 3.5, rect.center().y),
+        egui::pos2(dot_x + DOT_S / 2.0, rect.center().y),
         egui::vec2(DOT_S, DOT_S),
     );
     ui.painter()
         .rect_filled(dot, R_XS, if e.is_dir { pal().dir_sky } else { pal().text_muted });
 
-    let name_left = dot_x + 14.0;
-    let size_right = rect.right() - 10.0;
+    let name_left = dot_x + ROW_DOT_GAP;
+    let size_right = rect.right() - ROW_PAD_R;
     ui.painter()
         .with_clip_rect(egui::Rect::from_min_max(
             egui::pos2(name_left, rect.top()),
-            egui::pos2((size_right - 54.0).max(name_left + 20.0), rect.bottom()),
+            egui::pos2((size_right - ROW_SIZE_W).max(name_left + ROW_NAME_MIN), rect.bottom()),
         ))
         .text(
             egui::pos2(name_left, rect.center().y),
@@ -2587,7 +2612,7 @@ fn draw_row(
         } else {
             paths::sz(e.size)
         },
-        egui::FontId::monospace(10.0),
+        egui::FontId::monospace(FS_NOTE),
         pal().text_faint,
     );
 
@@ -2622,7 +2647,7 @@ fn draw_row(
         *cx.pending = Some(ListAction::ExportOne(e.name.clone()));
     }
     resp.context_menu(|ui| {
-        ui.set_min_width(150.0);
+        ui.set_min_width(W_MENU_MIN);
         if ui.button("导出该项…").clicked() {
             *cx.pending = Some(ListAction::ExportOne(e.name.clone()));
             ui.close_menu();
@@ -2850,7 +2875,7 @@ fn item_row(
         let (rect, _) = ui.allocate_exact_size(egui::vec2(DOT_S, DOT_S), egui::Sense::hover());
         ui.painter()
             .rect_filled(rect, R_XS, if is_dir { pal().dir_sky } else { pal().text_muted });
-        let name_w = (ui.available_width() - ROW_META_W).max(80.0);
+        let name_w = (ui.available_width() - ROW_META_W).max(W_NAME_MIN);
         let name_text = egui::RichText::new(p.display().to_string())
             .monospace()
             .size(FS_SUB)
@@ -2889,15 +2914,26 @@ fn item_row(
             paths::sz(p.metadata().map(|m| m.len()).unwrap_or(0))
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
-            if r.add(
-                egui::Button::new(egui::RichText::new("×").size(FS_SUB).color(pal().text_muted))
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(egui::Stroke::NONE)
-                    .small(),
-            )
-            .on_hover_text("移除")
-            .clicked()
-            {
+            // 原先显式 fill(TRANSPARENT) + stroke(NONE)：Button 渲染取
+            // fill.unwrap_or(visuals.weak_bg_fill)，一旦显式给值就不再随交互态变化，
+            // hover 与按下都没有任何视觉反馈——按钮可点却看不出可点。
+            // 改为局部把静止态设为透明，hover / 按下仍走主题默认视觉。
+            let clicked = r
+                .scope(|ui| {
+                    let w = &mut ui.style_mut().visuals.widgets;
+                    w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                    w.inactive.bg_stroke = egui::Stroke::NONE;
+                    ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("×").size(FS_SUB).color(pal().text_muted),
+                        )
+                        .small(),
+                    )
+                })
+                .inner
+                .on_hover_text("移除")
+                .clicked();
+            if clicked {
                 action = RowAction::Remove;
             }
             r.label(egui::RichText::new(size).monospace().size(FS_NOTE).color(pal().text_faint));
