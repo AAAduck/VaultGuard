@@ -55,7 +55,7 @@ cargo test --release
 target\x86_64-pc-windows-gnu\release\vaultguard.exe
 ```
 
-发布前跑 `cargo test --release`（往返矩阵：3 容器 × v2/v3 × 错误口令拒绝等）。发布时只复制该 EXE 到上级目录并命名为 `VaultGuard.exe`。zig 不可用时 build.rs 只发警告不阻断构建（EXE 功能不受影响，仅缺图标/清单）。不要提交或发布 `target/`、运行日志和临时验证文件。
+发布前跑 `cargo test --release`（往返矩阵：3 容器 × v2/v3 × 错误口令拒绝等）。发布时只复制该 EXE 到上级目录并命名为 `VaultGuard.exe`；**每次构建出新版后都必须用它覆盖上级目录的旧 `VaultGuard.exe`**——该发布件不在版本控制内（`.gitignore` 已排除），git 不会替你更新它，忘记覆盖就会出现「源码已改、运行的仍是旧版」。覆盖后确认文件大小与时间戳已变化。zig 不可用时 build.rs 只发警告不阻断构建（EXE 功能不受影响，仅缺图标/清单）。不要提交或发布 `target/`、运行日志和临时验证文件。
 
 ## 验证要求
 

@@ -148,6 +148,8 @@ outputs/                # 默认输出目录
 
 构建与源码说明见 [VaultGuard_rs/README.md](VaultGuard_rs/README.md)。运行程序不需要安装 Rust、Python、Zig 或其他运行时依赖。
 
+**构建出新版后必须用它覆盖本目录的 `VaultGuard.exe`**：该发布件不在版本控制内，git 不会自动更新它，不覆盖则运行的仍是旧版。
+
 ## 版本记录
 
 - **v2.3（2026-09-13）**：
