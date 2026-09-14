@@ -970,7 +970,6 @@ impl VaultApp {
                                         .size(FS_BODY)
                                         .color(pal().text_sub),
                                 )
-                                .fill(Color32::TRANSPARENT)
                                 .stroke(egui::Stroke::new(1.0_f32, pal().border))
                                 .rounding(R_SM)
                                 .min_size(egui::vec2(0.0, H_BTN)),
@@ -1024,11 +1023,16 @@ impl VaultApp {
                             let w0 = cols[0].available_width();
                             let w1 = cols[1].available_width();
                             if cols[0]
-                                .add_enabled(
-                                    !busy,
-                                    egui::Button::new("文件").min_size(egui::vec2(w0, H_BTN_SEC)),
-                                )
-                                .clicked()
+                                .scope(|ui| {
+                                    // 踩在页面底色上：静止底色显式要回卡片色，悬停走主题
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = pal().card;
+                                    ui.add_enabled(
+                                        !busy,
+                                        egui::Button::new("文件").min_size(egui::vec2(w0, H_BTN_SEC)),
+                                    )
+                                    .clicked()
+                                })
+                                .inner
                             {
                                 if let Some(files) = rfd::FileDialog::new().pick_files() {
                                     let n = files.len();
@@ -1039,11 +1043,16 @@ impl VaultApp {
                                 }
                             }
                             if cols[1]
-                                .add_enabled(
-                                    !busy,
-                                    egui::Button::new("文件夹").min_size(egui::vec2(w1, H_BTN_SEC)),
-                                )
-                                .clicked()
+                                .scope(|ui| {
+                                    // 踩在页面底色上：静止底色显式要回卡片色，悬停走主题
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = pal().card;
+                                    ui.add_enabled(
+                                        !busy,
+                                        egui::Button::new("文件夹").min_size(egui::vec2(w1, H_BTN_SEC)),
+                                    )
+                                    .clicked()
+                                })
+                                .inner
                             {
                                 if let Some(d) = rfd::FileDialog::new().pick_folder() {
                                     self.items.push(d);
@@ -2148,7 +2157,7 @@ impl VaultApp {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = SP_S;
                                 ui.add_enabled_ui(can_mutate, |ui| {
-                                    ui.menu_button(
+                                    menu_on_page(ui,
                                         egui::RichText::new("添加 ▾").size(FS_SUB).color(pal().text),
                                         |ui| {
                                             if ui.button("添加文件…").clicked() {
@@ -2177,7 +2186,7 @@ impl VaultApp {
                                     );
                                 });
                                 ui.add_enabled_ui(!busy, |ui| {
-                                    ui.menu_button(
+                                    menu_on_page(ui,
                                         egui::RichText::new("导出 ▾").size(FS_SUB).color(pal().text),
                                         |ui| {
                                             if ui.button("导出全部…").clicked() {
@@ -2230,7 +2239,7 @@ impl VaultApp {
                                     self.vp.confirm_compact = true;
                                 }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.menu_button(
+                                    menu_on_page(ui,
                                         egui::RichText::new("更多 ▾").size(FS_SUB).color(pal().text_sub),
                                         |ui| {
                                             let one = self.vp.sel.len() == 1;
@@ -2364,17 +2373,33 @@ impl VaultApp {
                                 ui.separator();
                                 ui.checkbox(&mut self.vp.tree, "目录树");
                                 ui.separator();
-                                egui::ComboBox::from_id_source("vault_sort")
-                                    .selected_text(match self.vp.sort {
-                                        SortKey::Name => "按名字",
-                                        SortKey::Size => "按大小",
-                                        SortKey::Kind => "按类型",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.vp.sort, SortKey::Name, "按名字");
-                                        ui.selectable_value(&mut self.vp.sort, SortKey::Size, "按大小");
-                                        ui.selectable_value(&mut self.vp.sort, SortKey::Kind, "按类型");
-                                    });
+                                ui.scope(|ui| {
+                                    // 踩在页面底色上：静止底色显式要回卡片色，悬停走主题
+                                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = pal().card;
+                                    egui::ComboBox::from_id_source("vault_sort")
+                                        .selected_text(match self.vp.sort {
+                                            SortKey::Name => "按名字",
+                                            SortKey::Size => "按大小",
+                                            SortKey::Kind => "按类型",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.vp.sort,
+                                                SortKey::Name,
+                                                "按名字",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.vp.sort,
+                                                SortKey::Size,
+                                                "按大小",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.vp.sort,
+                                                SortKey::Kind,
+                                                "按类型",
+                                            );
+                                        });
+                                });
                                 if ui
                                     .add(b_ghost(if self.vp.sort_desc { "降序 ↓" } else { "升序 ↑" }))
                                     .clicked()
@@ -3093,7 +3118,6 @@ fn b_secondary(text: &str) -> egui::Button<'static> {
 
 fn b_ghost(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(FS_SUB).color(pal().text))
-        .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(R_SM)
         .min_size(egui::vec2(0.0, H_BTN))
@@ -3107,7 +3131,6 @@ fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
         return;
     }
     let btn = egui::Button::new(egui::RichText::new("取消").size(FS_SUB).color(pal().text))
-        .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(R_SM)
         .min_size(egui::vec2(W_BTN_CANCEL, H_BTN_SM));
@@ -3118,6 +3141,21 @@ fn cancel_button(ui: &mut egui::Ui, c: &Cancel) {
     {
         c.cancel();
     }
+}
+
+/// 页面底色（非卡片表面）上的下拉按钮：全局 inactive 底色已改透明（给 ghost 族
+/// 让出 hover 反馈），踩在页面底色上的菜单按钮在这里显式要回卡片底色，
+/// 悬停/按下仍走主题交互态。弹层内的菜单项在卡片弹层上，观感不受影响。
+fn menu_on_page(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    ui.scope(|ui| {
+        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = pal().card;
+        ui.menu_button(label, add).response
+    })
+    .inner
 }
 
 fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
@@ -3145,19 +3183,18 @@ fn tab_button(ui: &mut egui::Ui, text: &str, selected: bool) -> bool {
     } else {
         (p.text_sub, Color32::TRANSPARENT, egui::Stroke::new(1.0_f32, p.border))
     };
-    ui.add(
-        egui::Button::new(egui::RichText::new(text).size(FS_BODY).color(fg))
-            .fill(bg)
-            .stroke(stroke)
-            .rounding(R_SM)
-            .min_size(egui::vec2(0.0, H_BTN)),
-    )
-    .clicked()
+    // 未选中页签不显式填底：静止透明（与原一致）、悬停亮起 card_hover；
+    // 选中页签保留实心强调色。
+    let btn = egui::Button::new(egui::RichText::new(text).size(FS_BODY).color(fg))
+        .stroke(stroke)
+        .rounding(R_SM)
+        .min_size(egui::vec2(0.0, H_BTN));
+    let btn = if selected { btn.fill(bg) } else { btn };
+    ui.add(btn).clicked()
 }
 
 fn ghost_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(FS_SUB).color(pal().text))
-        .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(R_SM)
         .min_size(egui::vec2(0.0, H_BTN))
@@ -3167,7 +3204,6 @@ fn ghost_button(text: &str) -> egui::Button<'static> {
 /// 保留描边（hover 时仍有边框可辨认），只降权不隐藏。
 fn ghost_button_mini(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(FS_NOTE).color(pal().text_sub))
-        .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(R_SM)
         .min_size(egui::vec2(0.0, H_BTN_SM))
@@ -3477,6 +3513,12 @@ fn build_style() -> egui::Style {
         w.bg_stroke = egui::Stroke::new(1.0_f32, pal().border);
         w.rounding = egui::Rounding::same(R_SM);
     }
+    // 透明底（ghost 族）按钮的悬停反馈：显式 fill 会冻结 egui 的 hover 态，
+    // 故把 inactive.weak_bg_fill 改为透明——ghost 族不再显式填底，静止透明、
+    // 悬停亮起 hovered(card_hover)、按下 accent_dim。bg_fill 保留 card：
+    // 滚动条滑块与复选框用它，不受影响；踩在页面底色上的菜单按钮 / 下拉框
+    // /「文件·文件夹」用 menu_on_page / scope 显式要回卡片底色。
+    v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, pal().text_sub);
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, pal().border);
     // 禁用控件会被淡向这个颜色（egui 的 gray_out 目标）。默认值在深色下接近纯黑，
