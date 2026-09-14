@@ -928,18 +928,6 @@ impl VaultApp {
                                     .strong()
                                     .color(pal().text),
                             );
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "v{}",
-                                    env!("CARGO_PKG_VERSION")
-                                        .split('.')
-                                        .next()
-                                        .unwrap_or("1")
-                                ))
-                                .monospace()
-                                .size(FS_NOTE)
-                                .color(pal().text_sub),
-                            );
                         });
                         ui.label(
                             egui::RichText::new("网盘伪装加密保险箱 —— 加密/还原均不触碰原文件")
