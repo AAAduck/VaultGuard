@@ -39,6 +39,8 @@ const FS_BODY: f32 = 13.0;
 const FS_SUB: f32 = 12.0;
 /// 说明文字、状态小字、徽标（原先小到 9.0，可读性不足）
 const FS_NOTE: f32 = 11.0;
+/// 页面大标题（egui Style 层的 Heading）
+const FS_H1: f32 = 16.0;
 
 // 间距：6 档阶梯（4 的倍数，形成节奏）
 /// 紧贴：标签与它自己的控件之间
@@ -49,8 +51,8 @@ const SP_S: f32 = 8.0;
 const SP_L: f32 = 16.0;
 /// 大间隔 / 空状态上下留白
 const SP_XL: f32 = 24.0;
-/// 空状态（无内容）专用大留白
-const SP_XXL: f32 = 32.0;
+/// 控件之间的默认间距（egui Style 层；沿用原值 10，不在 4 的倍数阶梯内）
+const SP_CTRL: f32 = 10.0;
 
 // 内边距：卡片统一一套，不再每个卡片各自为政
 /// 卡片左右内边距
@@ -129,6 +131,10 @@ const W_INPUT: f32 = 300.0;
 const W_FILTER: f32 = 170.0;
 /// 状态条进度条宽度
 const W_PROGRESS: f32 = 180.0;
+/// 按钮内上下边距（egui Style 层，比左右 PAD_X 更紧）
+const BTN_PAD_Y: f32 = 9.0;
+/// 交互控件最小宽度（egui Style 层）
+const W_INTERACT: f32 = 64.0;
 
 // ── 主题与配色：深色 / 浅色两套令牌（对齐退役 React 版的 tailwind 配色）──
 
@@ -1420,21 +1426,11 @@ impl VaultApp {
                                     .max_height(ui.available_height().clamp(LIST_H_MIN, LIST_H_MAX))
                                     .show(ui, |ui| {
                                         if self.items.is_empty() {
-                                            ui.vertical_centered(|ui| {
-                                                ui.add_space(SP_XXL);
-                                                ui.label(
-                                                    egui::RichText::new("把文件或文件夹拖进窗口")
-                                                        .size(FS_BODY)
-                                                        .color(pal().text_sub),
-                                                );
-                                                ui.add_space(SP_XS);
-                                                ui.label(
-                                                    egui::RichText::new("加密后的容器拖回来即可还原")
-                                                        .size(FS_NOTE)
-                                                        .color(pal().text_faint),
-                                                );
-                                                ui.add_space(SP_XL);
-                                            });
+                                            empty_state(
+                                                ui,
+                                                "把文件或文件夹拖进窗口",
+                                                Some("加密后的容器拖回来即可还原"),
+                                            );
                                             return;
                                         }
                                         let mut remove_idx: Option<usize> = None;
@@ -1597,7 +1593,7 @@ impl VaultApp {
                         self.run_dec_place(None);
                     }
                     if ui
-                        .add_enabled(!busy, ghost_button("取消"))
+                        .add_enabled(!busy, ghost_button("取消").min_size(egui::vec2(0.0, H_BTN_SEC)))
                         .clicked()
                     {
                         self.cancel_dec_preview();
@@ -1668,7 +1664,7 @@ impl VaultApp {
                             let pass = self.vp.pass.clone();
                             self.start_vault(VaultTask::Open(path, pass), "打开并认证");
                         }
-                        if ui.add_enabled(!busy, b_ghost("浏览…")).clicked() {
+                        if ui.add_enabled(!busy, b_ghost("浏览…").min_size(egui::vec2(0.0, H_BTN_SEC))).clicked() {
                             if let Some(p) = rfd::FileDialog::new()
                                 .add_filter("VaultGuard 保险箱", &["vgsafe"])
                                 .pick_file()
@@ -1880,7 +1876,7 @@ impl VaultApp {
                             self.vp.anchor = None;
                             self.start_vault(VaultTask::Rename(from.clone(), to), "重命名");
                         }
-                        if ui.add(b_ghost("取消")).clicked() {
+                        if ui.add(b_ghost("取消").min_size(egui::vec2(0.0, H_BTN_SEC))).clicked() {
                             self.vp.renaming = false;
                         }
                     });
@@ -1933,7 +1929,7 @@ impl VaultApp {
                             self.vp.anchor = None;
                             self.start_vault(VaultTask::MoveEntry(name.clone(), dir), "移动条目");
                         }
-                        if ui.add(b_ghost("取消")).clicked() {
+                        if ui.add(b_ghost("取消").min_size(egui::vec2(0.0, H_BTN_SEC))).clicked() {
                             self.vp.moving = false;
                         }
                     });
@@ -1988,7 +1984,7 @@ impl VaultApp {
                             self.vp.pass2.clear();
                             self.start_vault(VaultTask::ChangePass(new_pass), "更换口令（重写容器）");
                         }
-                        if ui.add(b_ghost("取消")).clicked() {
+                        if ui.add(b_ghost("取消").min_size(egui::vec2(0.0, H_BTN_SEC))).clicked() {
                             self.vp.changing = false;
                             self.vp.pass.clear();
                             self.vp.pass2.clear();
@@ -2298,7 +2294,7 @@ impl VaultApp {
                                                 self.vp.anchor = None;
                                                 self.start_vault(VaultTask::Remove(names), "移除条目");
                                             }
-                                            if ui.add(b_ghost("取消")).clicked() {
+                                            if ui.add(b_ghost("取消").min_size(egui::vec2(0.0, H_BTN_SEC))).clicked() {
                                                 self.vp.confirm_remove = false;
                                             }
                                         });
@@ -2329,7 +2325,7 @@ impl VaultApp {
                                                 self.vp.confirm_compact = false;
                                                 self.start_vault(VaultTask::Compact, "压缩容器（重写中）");
                                             }
-                                            if ui.add(b_ghost("取消")).clicked() {
+                                            if ui.add(b_ghost("取消").min_size(egui::vec2(0.0, H_BTN_SEC))).clicked() {
                                                 self.vp.confirm_compact = false;
                                             }
                                         });
@@ -2439,27 +2435,19 @@ impl VaultApp {
                                     };
                                     let entries: &[safe::Entry] = &sess.entries;
                                     if entries.is_empty() {
-                                        ui.vertical_centered(|ui| {
-                                            ui.add_space(SP_XL);
-                                            ui.label(
-                                                egui::RichText::new("保险箱是空的：点上方「添加 ▾」放入文件或文件夹")
-                                                    .size(FS_SUB)
-                                                    .color(pal().text_sub),
-                                            );
-                                            ui.add_space(SP_L);
-                                        });
+                                        empty_state(
+                                            ui,
+                                            "保险箱是空的：点上方「添加 ▾」放入文件或文件夹",
+                                            None,
+                                        );
                                         return;
                                     }
                                     if visible.is_empty() {
-                                        ui.vertical_centered(|ui| {
-                                            ui.add_space(SP_XL);
-                                            ui.label(
-                                                egui::RichText::new("没有匹配的条目：清空过滤条件可看全部")
-                                                    .size(FS_SUB)
-                                                    .color(pal().text_sub),
-                                            );
-                                            ui.add_space(SP_L);
-                                        });
+                                        empty_state(
+                                            ui,
+                                            "没有匹配的条目：清空过滤条件可看全部",
+                                            None,
+                                        );
                                         return;
                                     }
                                     let tree = self.vp.tree.then(|| build_tree(entries, &visible));
@@ -2762,6 +2750,20 @@ fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(SP_S);
 }
 
+/// 空状态：主文案 +（可选）副文案。加密页与保险箱页原先各写一套，上下留白与
+/// 字号都不一致；统一成同一呈现，同类场景不再有三种长相。
+fn empty_state(ui: &mut egui::Ui, main: &str, sub: Option<&str>) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(SP_XL);
+        ui.label(egui::RichText::new(main).size(FS_BODY).color(pal().text_sub));
+        if let Some(s) = sub {
+            ui.add_space(SP_XS);
+            ui.label(egui::RichText::new(s).size(FS_NOTE).color(pal().text_faint));
+        }
+        ui.add_space(SP_XL);
+    });
+}
+
 /// 口令强度评估：返回 (强度级 0弱/1中/2强, 说明)。
 fn pass_strength(pass: &str) -> (u8, &'static str) {
     const COMMON: [&str; 10] = [
@@ -3005,7 +3007,7 @@ fn error_card(ui: &mut egui::Ui, err: &mut Option<String>) {
     egui::Frame::default()
         .fill(pal().card)
         .stroke(egui::Stroke::new(1.0_f32, pal().danger))
-        .rounding(R_SM)
+        .rounding(R_MD)
         .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -3449,7 +3451,7 @@ fn build_style() -> egui::Style {
         w.bg_fill = bg;
         w.fg_stroke = egui::Stroke::new(1.0_f32, fg);
         w.bg_stroke = egui::Stroke::new(1.0_f32, pal().border);
-        w.rounding = egui::Rounding::same(7.0);
+        w.rounding = egui::Rounding::same(R_SM);
     }
     v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, pal().text_sub);
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, pal().border);
@@ -3458,15 +3460,15 @@ fn build_style() -> egui::Style {
     v.widgets.noninteractive.weak_bg_fill = pal().panel;
 
     // 控件之间留 10px（原 8px）——控件不再互相挨着，是「不挤」的第一来源
-    style.spacing.item_spacing = egui::vec2(SP_S + 2.0, SP_S + 2.0);
-    style.spacing.button_padding = egui::vec2(14.0, 9.0);
+    style.spacing.item_spacing = egui::vec2(SP_CTRL, SP_CTRL);
+    style.spacing.button_padding = egui::vec2(PAD_X, BTN_PAD_Y);
     // 输入类控件高度统一到 30px（原 28px），文字与边框之间有余量
-    style.spacing.interact_size = egui::vec2(64.0, 30.0);
+    style.spacing.interact_size = egui::vec2(W_INTERACT, H_BTN);
     style.spacing.menu_margin = egui::Margin::same(SP_S);
 
     style
         .text_styles
-        .insert(egui::TextStyle::Heading, egui::FontId::proportional(FS_TITLE + 1.0));
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(FS_H1));
     style
         .text_styles
         .insert(egui::TextStyle::Body, egui::FontId::proportional(FS_BODY));
