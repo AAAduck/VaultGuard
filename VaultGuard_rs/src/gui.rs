@@ -238,6 +238,10 @@ struct Pal {
     log_default: Color32,
     extreme_bg: Color32,
     faint_bg: Color32,
+    /// accent 实底按钮的悬停底色（深色主题提亮一档；浅色主题相反、加深一档）
+    accent_hover: Color32,
+    /// card_hover 实底按钮的悬停底色（比 card_hover 再进一档）
+    card_hover_strong: Color32,
 }
 
 const PAL_DARK: Pal = Pal {
@@ -268,6 +272,9 @@ const PAL_DARK: Pal = Pal {
     log_default: Color32::from_rgb(0x9C, 0x9C, 0xA4),
     extreme_bg: Color32::from_rgb(0x0D, 0x0D, 0x10),
     faint_bg: Color32::from_rgb(0x14, 0x14, 0x17),
+    // emerald-500：accent(emerald-600) 暗底上提亮一档
+    accent_hover: Color32::from_rgb(0x10, 0xB9, 0x81),
+    card_hover_strong: Color32::from_rgb(0x2A, 0x2A, 0x2E),
 };
 
 const PAL_LIGHT: Pal = Pal {
@@ -298,6 +305,9 @@ const PAL_LIGHT: Pal = Pal {
     log_default: Color32::from_rgb(0x3F, 0x3F, 0x46),
     extreme_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     faint_bg: Color32::from_rgb(0xEC, 0xEE, 0xF2),
+    // emerald-700：白底上加深一档更醒目
+    accent_hover: Color32::from_rgb(0x04, 0x78, 0x57),
+    card_hover_strong: Color32::from_rgb(0xE2, 0xE5, 0xEA),
 };
 
 thread_local! {
@@ -1065,12 +1075,14 @@ impl VaultApp {
                         let pass_ready = (!self.passphrase.is_empty()
                             && self.passphrase == self.passphrase2)
                             || self.allow_no_pass;
-                        if ui
-                            .add_enabled(
+                        if solid_scope(ui, pal().accent, pal().accent_hover, |ui| {
+                            ui.add_enabled(
                                 !self.busy && pass_ready,
-                                primary_button("开始加密（所选外壳）").min_size(egui::vec2(width, H_BTN_MAIN)),
+                                primary_button("开始加密（所选外壳）")
+                                    .min_size(egui::vec2(width, H_BTN_MAIN)),
                             )
-                            .clicked()
+                        })
+                        .clicked()
                         {
                             self.run_enc();
                         }
@@ -1080,7 +1092,11 @@ impl VaultApp {
                         } else {
                             "还原 VaultGuard 文件".to_string()
                         };
-                        if ui.add_sized([width, H_BTN_SEC], secondary_button(dec_label)).clicked() {
+                        if solid_scope(ui, pal().card_hover, pal().card_hover_strong, |ui| {
+                            ui.add_sized([width, H_BTN_SEC], secondary_button(dec_label))
+                        })
+                        .clicked()
+                        {
                             self.run_dec();
                         }
                         // 次级操作：降到迷你档，权重明显低于上方两个主操作；
@@ -1494,9 +1510,13 @@ impl VaultApp {
                                 .inner_margin(egui::Margin::symmetric(PAD_X, PAD_Y))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui
-                                            .add(primary_button("打开输出目录").min_size(egui::vec2(0.0, H_BTN_SEC)))
-                                            .clicked()
+                                        if add_accent_solid(
+                                            ui,
+                                            true,
+                                            primary_button("打开输出目录")
+                                                .min_size(egui::vec2(0.0, H_BTN_SEC)),
+                                        )
+                                        .clicked()
                                         {
                                             open_in_explorer(out);
                                         }
@@ -1596,7 +1616,8 @@ impl VaultApp {
                 ui.add_space(SP_XS);
                 ui.horizontal(|ui| {
                     let sel_count = self.dec_sel.len();
-                    let place_sel = ui.add_enabled(
+                    let place_sel = add_card_solid(
+                        ui,
                         !busy && sel_count > 0,
                         secondary_button(format!("落位选中（{}）", sel_count)),
                     );
@@ -1608,9 +1629,7 @@ impl VaultApp {
                             .collect();
                         self.run_dec_place(Some(sel));
                     }
-                    if ui
-                        .add_enabled(!busy, secondary_button("全部落位"))
-                        .clicked()
+                    if add_card_solid(ui, !busy, secondary_button("全部落位")).clicked()
                     {
                         self.run_dec_place(None);
                     }
@@ -1668,8 +1687,7 @@ impl VaultApp {
                             && self.vp.pass == self.vp.pass2;
                         let open_ready =
                             !busy && !self.vp.path.trim().is_empty() && !self.vp.pass.is_empty();
-                        if ui
-                            .add_enabled(create_ready, b_primary("新建"))
+                        if add_accent_solid(ui, create_ready, b_primary("新建"))
                             .on_hover_text("用当前口令创建一个新的空保险箱")
                             .clicked()
                         {
@@ -1677,8 +1695,7 @@ impl VaultApp {
                             let pass = self.vp.pass.clone();
                             self.start_vault(VaultTask::Create(path, pass), "创建容器");
                         }
-                        if ui
-                            .add_enabled(open_ready, b_secondary("打开"))
+                        if add_card_solid(ui, open_ready, b_secondary("打开"))
                             .on_hover_text("认证并解锁已有保险箱（只填第一格口令）")
                             .clicked()
                         {
@@ -1891,7 +1908,7 @@ impl VaultApp {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SP_S;
                         let ready = can && !from.is_empty() && !self.vp.ren_val.trim().is_empty();
-                        if ui.add_enabled(ready, b_primary("确定重命名")).clicked() {
+                        if add_accent_solid(ui, ready, b_primary("确定重命名")).clicked() {
                             let to = self.vp.ren_val.trim().to_string();
                             self.vp.renaming = false;
                             self.vp.sel.clear();
@@ -1941,8 +1958,7 @@ impl VaultApp {
                     ui.add_space(SP_S);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SP_S;
-                        if ui
-                            .add_enabled(can && !name.is_empty(), b_primary("确定移动"))
+                        if add_accent_solid(ui, can && !name.is_empty(), b_primary("确定移动"))
                             .clicked()
                         {
                             let dir = self.vp.mv_val.trim().to_string();
@@ -1999,7 +2015,7 @@ impl VaultApp {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = SP_S;
                         let ready = can && !self.vp.pass.is_empty() && self.vp.pass == self.vp.pass2;
-                        if ui.add_enabled(ready, b_primary("应用新口令")).clicked() {
+                        if add_accent_solid(ui, ready, b_primary("应用新口令")).clicked() {
                             let new_pass = self.vp.pass.clone();
                             self.vp.changing = false;
                             self.vp.pass.clear();
@@ -2306,8 +2322,7 @@ impl VaultApp {
                                                 .size(FS_NOTE)
                                                 .color(pal().danger),
                                             );
-                                            if ui
-                                                .add_enabled(can_mutate && n > 0, b_primary("确认移除"))
+                                            if add_accent_solid(ui, can_mutate && n > 0, b_primary("确认移除"))
                                                 .clicked()
                                             {
                                                 let names = self.vp.sel_names();
@@ -2343,7 +2358,7 @@ impl VaultApp {
                                                 .size(FS_NOTE)
                                                 .color(pal().busy_amber),
                                             );
-                                            if ui.add_enabled(can_mutate, b_primary("开始压缩")).clicked() {
+                                            if add_accent_solid(ui, can_mutate, b_primary("开始压缩")).clicked() {
                                                 self.vp.confirm_compact = false;
                                                 self.start_vault(VaultTask::Compact, "压缩容器（重写中）");
                                             }
@@ -3102,7 +3117,6 @@ fn b_primary(text: &str) -> egui::Button<'static> {
             .strong()
             .color(pal().on_accent),
     )
-    .fill(pal().accent)
     .stroke(egui::Stroke::NONE)
     .rounding(R_SM)
     .min_size(egui::vec2(0.0, H_BTN_SEC))
@@ -3110,7 +3124,6 @@ fn b_primary(text: &str) -> egui::Button<'static> {
 
 fn b_secondary(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(FS_SUB).color(pal().text))
-        .fill(pal().card_hover)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(R_SM)
         .min_size(egui::vec2(0.0, H_BTN_SEC))
@@ -3158,9 +3171,51 @@ fn menu_on_page(
     .inner
 }
 
+/// solid 族（实底）按钮的交互态装订：egui 显式 fill 会冻结 hover/active 态，
+/// 故这类按钮构造器不再填底，改在 scope 内钉住交互分支的 weak_bg_fill——
+/// 静止与禁用保持原底色，悬停亮一档、按下回落。描边仍由按钮显式给出、
+/// 文字色由 RichText 控制，均不随交互态变化。
+fn solid_scope(
+    ui: &mut egui::Ui,
+    base: Color32,
+    hover: Color32,
+    add: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::Response {
+    ui.scope(|ui| {
+        let w = &mut ui.style_mut().visuals.widgets;
+        w.inactive.weak_bg_fill = base;
+        w.hovered.weak_bg_fill = hover;
+        w.active.weak_bg_fill = base;
+        w.noninteractive.weak_bg_fill = base; // 禁用保持原底色（与改动前一致）
+        add(ui)
+    })
+    .inner
+}
+
+/// accent 实底按钮（b_primary / primary_button）的调用点包装。
+fn add_accent_solid(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    btn: egui::Button<'static>,
+) -> egui::Response {
+    solid_scope(ui, pal().accent, pal().accent_hover, |ui| {
+        ui.add_enabled(enabled, btn)
+    })
+}
+
+/// card_hover 实底按钮（b_secondary / secondary_button）的调用点包装。
+fn add_card_solid(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    btn: egui::Button<'static>,
+) -> egui::Response {
+    solid_scope(ui, pal().card_hover, pal().card_hover_strong, |ui| {
+        ui.add_enabled(enabled, btn)
+    })
+}
+
 fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(FS_BODY).strong().color(pal().on_accent))
-        .fill(pal().accent)
         .stroke(egui::Stroke::NONE)
         .rounding(R_SM)
         .min_size(egui::vec2(0.0, H_BTN_MAIN))
@@ -3168,7 +3223,6 @@ fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
 
 fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).size(FS_BODY).color(pal().text))
-        .fill(pal().card_hover)
         .stroke(egui::Stroke::new(1.0_f32, pal().border))
         .rounding(R_SM)
         .min_size(egui::vec2(0.0, H_BTN_SEC))
